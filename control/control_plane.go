@@ -7,15 +7,18 @@ package control
 
 import (
 	"context"
-	"errors"
+	stderrors "errors"
 	"fmt"
 	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -27,7 +30,9 @@ import (
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/assets"
 	"github.com/daeuniverse/dae/common/consts"
+	commonerrors "github.com/daeuniverse/dae/common/errors"
 	"github.com/daeuniverse/dae/common/netutils"
+	"github.com/daeuniverse/dae/component/daedns"
 	"github.com/daeuniverse/dae/component/dns"
 	"github.com/daeuniverse/dae/component/outbound"
 	"github.com/daeuniverse/dae/component/outbound/dialer"
@@ -35,13 +40,14 @@ import (
 	"github.com/daeuniverse/dae/config"
 	"github.com/daeuniverse/dae/pkg/config_parser"
 	internal "github.com/daeuniverse/dae/pkg/ebpf_internal"
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/direct"
 	"github.com/daeuniverse/outbound/transport/grpc"
 	"github.com/daeuniverse/outbound/transport/meek"
 	dnsmessage "github.com/miekg/dns"
-	"github.com/mohae/deepcopy"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sync/singleflight"
 	"golang.org/x/sys/unix"
 )
 
@@ -52,9 +58,14 @@ type ControlPlane struct {
 	deferFuncs []func() error
 	listenIp   string
 
-	// TODO: add mutex?
-	outbounds     []*outbound.DialerGroup
-	inConnections sync.Map
+	// outbounds is an immutable slice set during NewControlPlane initialization.
+	// It is safe for concurrent reads without synchronization because:
+	// 1. The slice is never modified after initialization
+	// 2. The ready channel is closed only after outbounds is fully populated
+	// 3. All reads happen-after the ready channel is closed
+	outbounds           []*outbound.DialerGroup
+	referencedOutbounds map[string]struct{} // outbounds referenced by routing rules
+	inConnections       sync.Map
 
 	dnsController    *DnsController
 	dnsListener      *DNSListener
@@ -68,21 +79,206 @@ type ControlPlane struct {
 	cancel context.CancelFunc
 	ready  chan struct{}
 
-	muRealDomainSet sync.Mutex
-	realDomainSet   *bloom.BloomFilter
+	muRealDomainSet   sync.RWMutex
+	realDomainSet     *bloom.BloomFilter
+	realDomainNegSet  sync.Map // map[string]int64 (expiresAt unix nano)
+	dnsDialerSnapshot sync.Map // map[dnsDialerSnapshotKey]*dnsDialerSnapshotEntry
+	dnsDialerPenalty  sync.Map // map[dnsDialerPenaltyKey]*dnsDialerPenaltyEntry
+	tcpSniffNegMu     sync.RWMutex
+	tcpSniffNegSet    map[tcpSniffNegKey]tcpSniffNegEntry
+	realDomainProbeS  singleflight.Group
+	negJanitorStop    chan struct{}
+	negJanitorDone    chan struct{}
+	negJanitorOnce    sync.Once
+
+	connStateJanitorStop chan struct{}
+	connStateJanitorDone chan struct{}
+	connStateJanitorOnce sync.Once
+	connStateScratch     *connStateJanitorScratch
+
+	// Track last alert time to avoid spamming logs
+	lastBpfOverflowAlertTime atomic.Int64
+	lastUdpPressureAlertTime atomic.Int64
+	lastTcpPressureAlertTime atomic.Int64
 
 	wanInterface []string
 	lanInterface []string
 
-	sniffingTimeout   time.Duration
-	tproxyPortProtect bool
-	soMarkFromDae     uint32
-	mptcp             bool
+	sniffingTimeout                time.Duration
+	tproxyPortProtect              bool
+	soMarkFromDae                  uint32
+	mptcp                          bool
+	bootstrapResolvers             []netip.AddrPort
+	udpRouteScopeSensitive         bool
+	udpUnorderedRunner             *udpUnorderedTaskRunner
+	failedQuicDcidCache            *failedQuicDcidCache
+	lastConnectionErrorLogTime     atomic.Int64
+	lastDnsFastPathErrorLogTime    atomic.Int64
+	lastDnsFastPathServfailLogTime atomic.Int64
+}
+
+type connStateJanitorScratch struct {
+	redirectKeys   []bpfRedirectTuple
+	redirectValues []bpfRedirectEntry
+	redirectDelete []bpfRedirectTuple
+
+	cookiePidKeys   []uint64
+	cookiePidValues []bpfPidPname
+	cookiePidDelete []uint64
+
+	udpKeys   []bpfTuplesKey
+	udpValues []bpfUdpConnState
+	udpDelete []bpfTuplesKey
+
+	tcpKeys   []bpfTuplesKey
+	tcpValues []bpfTcpConnState
+	tcpDelete []bpfTuplesKey
+
+	routingHandoffKeys   []bpfTuplesKey
+	routingHandoffValues []bpfRoutingHandoffEntry
+	routingHandoffDelete []bpfTuplesKey
+}
+
+const (
+	janitorBatchLookupSize = 1024
+	janitorDeleteInitCap   = 256
+	janitorDeleteRetainMax = 8192
+)
+
+func ensureJanitorLookupScratch[T any](buf []T) []T {
+	if cap(buf) < janitorBatchLookupSize {
+		return make([]T, janitorBatchLookupSize)
+	}
+	return buf[:janitorBatchLookupSize]
+}
+
+func takeJanitorDeleteScratch[T any](buf []T) []T {
+	if cap(buf) < janitorDeleteInitCap {
+		return make([]T, 0, janitorDeleteInitCap)
+	}
+	return buf[:0]
+}
+
+func keepJanitorDeleteScratch[T any](buf []T) []T {
+	if cap(buf) > janitorDeleteRetainMax {
+		return make([]T, 0, janitorDeleteInitCap)
+	}
+	return buf[:0]
+}
+
+var (
+	// realDomainNegativeCacheTTL controls how long failed real-domain probes are cached.
+	// Keep it short to avoid stale negatives while still damping bursty probe storms.
+	realDomainNegativeCacheTTL = 10 * time.Second
+	// gracefulShutdownWaitTimeout bounds how long shutdown waits for background
+	// janitors and workers before continuing teardown.
+	gracefulShutdownWaitTimeout = 5 * time.Second
+	// controlPlaneDeferredCleanupTimeout bounds non-critical Close tail work
+	// such as old-generation dialer, DNS, and hook cleanup during reload.
+	controlPlaneDeferredCleanupTimeout = 2 * time.Second
+	// realDomainProbeTimeout bounds synchronous probe latency on connection setup path.
+	// Keep it sub-second to avoid hurting first-paint responsiveness under DNS jitter.
+	// Reduced from 800ms to 500ms for faster fallback under poor network conditions.
+	realDomainProbeTimeout = 500 * time.Millisecond
+	// dnsDialerSnapshotTTL caches dialer selection results to reduce selection overhead.
+	// Set to 2s since dialer health status only updates every 30s (default CheckInterval).
+	// This provides good cache hit rate without missing dialer state changes.
+	dnsDialerSnapshotTTL         = 2 * time.Second
+	dnsDialerPenaltyTTL          = 5 * time.Second
+	realDomainNegJanitorInterval = 30 * time.Second
+
+	// UDP connection state timeout constants (matching former bpf_timer values).
+	// DNS connections are shorter-lived since they're typically query/response.
+	udpConnStateTimeoutDNS = 17 * time.Second
+
+	// DNS port in network byte order for connection state cleanup.
+	// Precomputed to avoid repeated Htons() calls during janitor iterations.
+	dnsPortNetworkOrder = common.Htons(53)
+	// connStateJanitorPressureInterval is the fast-path scan interval used
+	// when connection-state maps are under pressure.
+	connStateJanitorPressureInterval = 1 * time.Second
+	// connStateJanitorSteadyInterval is the default scan interval for steady
+	// state. This keeps cleanup prompt without paying a full-table cost every
+	// second when map pressure is low.
+	connStateJanitorSteadyInterval = 5 * time.Second
+	// redirectTrackJanitorPressureInterval is used when maps are under pressure.
+	redirectTrackJanitorPressureInterval = 5 * time.Second
+	// redirectTrackJanitorSteadyInterval is sufficient for the redirect cache
+	// because stale entries have a limited blast radius.
+	redirectTrackJanitorSteadyInterval = 30 * time.Second
+	// cookiePidMapTimeout bounds stale cookie metadata when sock_release backstop
+	// is missed for any reason. Active sockets refresh this timestamp from BPF.
+	cookiePidMapTimeout = 5 * time.Minute
+	// connStateJanitorPressureEnterUsage is the usage percentage that activates
+	// pressure mode for connection-state cleanup.
+	connStateJanitorPressureEnterUsage = 70
+	// connStateJanitorPressureExitUsage is the usage percentage below which the
+	// janitor starts counting down to leave pressure mode.
+	connStateJanitorPressureExitUsage = 50
+	// connStateJanitorPressureExitRounds is the number of consecutive low-usage
+	// cleanup rounds required before leaving pressure mode.
+	connStateJanitorPressureExitRounds = 3
+	// routingHandoffTimeout bounds the tuple-miss metadata bridge between eBPF
+	// and userspace. Keep it short so the handoff map does not become a second
+	// long-lived conn-state cache.
+	routingHandoffTimeout = 10 * time.Second
+	// routingHandoffPressureInterval lets the janitor react quickly when the
+	// handoff map is churning under repeated tuple misses.
+	routingHandoffPressureInterval = 1 * time.Second
+	// routingHandoffSteadyInterval is sufficient because RetrieveRoutingResult
+	// also rejects expired handoff entries on read.
+	routingHandoffSteadyInterval = 5 * time.Second
+	dnsFastPathErrorLogInterval  = 5 * time.Second
+
+	// TCP connection state timeout constants.
+	// TCP connections are longer-lived but we still need to clean up closed connections.
+	// Established connections: 2 minutes timeout (conservative, most connections close sooner)
+	// Closing connections (FIN/RST seen): 10 seconds timeout (quick cleanup)
+	tcpConnStateTimeoutEstablished = 120 * time.Second
+	tcpConnStateTimeoutClosing     = 10 * time.Second
+
+	// Test seams: injected in tests to avoid external DNS dependency.
+	resolveIp46ForBootstrap       = netutils.ResolveIp46
+	resolveIp46ForRealDomainProbe = netutils.ResolveIp46
+)
+
+type mapCleanupStats struct {
+	entries      int
+	deleted      int
+	usagePercent int
+}
+
+type connStateJanitorPressureState struct {
+	active               bool
+	belowThresholdRounds int
+	lastUdpOverflow      uint64
+	lastTcpOverflow      uint64
+}
+
+func isIPLikeDomain(domain string) bool {
+	if domain == "" {
+		return false
+	}
+	if strings.HasPrefix(domain, "[") && strings.HasSuffix(domain, "]") {
+		domain = domain[1 : len(domain)-1]
+	}
+	if _, err := netip.ParseAddr(domain); err == nil {
+		return true
+	}
+	if host, _, err := net.SplitHostPort(domain); err == nil {
+		if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+			host = host[1 : len(host)-1]
+		}
+		if _, err := netip.ParseAddr(host); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func NewControlPlane(
 	log *logrus.Logger,
-	_bpf interface{},
+	_bpf any,
 	dnsCache map[string]*DnsCache,
 	tagToNodeList map[string][]string,
 	groups []config.Group,
@@ -90,13 +286,58 @@ func NewControlPlane(
 	global *config.Global,
 	dnsConfig *config.Dns,
 	externGeoDataDirs []string,
-) (*ControlPlane, error) {
-	// TODO: Some users reported that enabling GSO on the client would affect the performance of watching YouTube, so we disabled it by default.
-	if _, ok := os.LookupEnv("QUIC_GO_DISABLE_GSO"); !ok {
-		os.Setenv("QUIC_GO_DISABLE_GSO", "1")
+) (plane *ControlPlane, err error) {
+	return NewControlPlaneWithContext(
+		context.Background(),
+		log,
+		_bpf,
+		dnsCache,
+		tagToNodeList,
+		groups,
+		routingA,
+		global,
+		dnsConfig,
+		externGeoDataDirs,
+	)
+}
+
+func NewControlPlaneWithContext(
+	ctx context.Context,
+	log *logrus.Logger,
+	_bpf any,
+	dnsCache map[string]*DnsCache,
+	tagToNodeList map[string][]string,
+	groups []config.Group,
+	routingA *config.Routing,
+	global *config.Global,
+	dnsConfig *config.Dns,
+	externGeoDataDirs []string,
+) (plane *ControlPlane, err error) {
+	// Clear failed QUIC DCID cache on reload/startup.
+	// Network conditions may have changed, so we should allow retrying sniffing
+	// for DCIDs that previously failed.
+	ClearFailedQuicDcids()
+
+	if global.SoMarkFromDae == 0 {
+		var autoSelected bool
+		global.SoMarkFromDae, autoSelected = common.ResolveSoMarkFromDae(global.SoMarkFromDae, global.SoMarkFromDaeSet)
+		if autoSelected {
+			log.Warnf("so_mark_from_dae is unset; using internal socket mark %#x to prevent dae UDP self-capture", global.SoMarkFromDae)
+		}
 	}
 
-	var err error
+	// Register the cache clear function with dialer package so health checks
+	// can clear the failed DCID cache when network conditions improve.
+	dialer.SetQuicDcidCacheClearFunc(ClearFailedQuicDcids)
+
+	bootstrapResolvers, err := config.BootstrapResolvers(global)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, ok := os.LookupEnv("QUIC_GO_DISABLE_GSO"); !ok {
+		_ = os.Setenv("QUIC_GO_DISABLE_GSO", "1")
+	}
 
 	kernelVersion, e := internal.KernelVersion()
 	if e != nil {
@@ -156,13 +397,15 @@ func NewControlPlane(
 
 	/// Load pre-compiled programs and maps into the kernel.
 	if _bpf == nil {
+		// Conn-state maps are preserved across in-process reload via object handoff,
+		// so fresh loads should not inherit stale bpffs pins from previous processes.
+		cleanupPinnedConnStateMapFiles(log, pinPath)
 		log.Infof("Loading eBPF programs and maps into the kernel...")
 		log.Infof("The loading process takes about 120MB free memory, which will be released after loading. Insufficient memory will cause loading failure.")
 	}
 	// var bpf bpfObjects
 	ProgramOptions := ebpf.ProgramOptions{
 		KernelTypes: nil,
-		LogSize:     ebpf.DefaultVerifierLogSize * 10,
 	}
 	if log.Level == logrus.PanicLevel {
 		ProgramOptions.LogLevel = ebpf.LogLevelBranch | ebpf.LogLevelStats
@@ -174,25 +417,30 @@ func NewControlPlane(
 		},
 		Programs: ProgramOptions,
 	}
+
 	var bpf *bpfObjects
 	if _bpf != nil {
-		if _bpf, ok := _bpf.(*bpfObjects); ok {
-			bpf = _bpf
+		if obj, ok := _bpf.(*bpfObjects); ok {
+			bpf = obj
 		} else {
 			return nil, fmt.Errorf("unexpected bpf type: %T", _bpf)
 		}
 	} else {
 		bpf = new(bpfObjects)
 		if err = fullLoadBpfObjects(log, bpf, &loadBpfOptions{
-			PinPath:             pinPath,
-			BigEndianTproxyPort: uint32(common.Htons(global.TproxyPort)),
-			CollectionOptions:   collectionOpts,
-		}); err != nil {
+			PinPath:           pinPath,
+			CollectionOptions: collectionOpts,
+		}, global.SoMarkFromDae); err != nil {
 			if log.Level == logrus.PanicLevel {
 				log.Panicln(err)
 			}
 			return nil, fmt.Errorf("load eBPF objects: %w", err)
 		}
+	}
+	// Ensure critical maps are always present. DNS fast-path optimizations only
+	// skip per-flow map updates, never map object creation.
+	if err = validateRequiredBpfMapsLoaded(bpf); err != nil {
+		return nil, fmt.Errorf("validate bpf maps: %w", err)
 	}
 	log.Infof("Loaded eBPF programs and maps")
 	// outboundId2Name can be modified later.
@@ -206,18 +454,30 @@ func NewControlPlane(
 	)
 	defer func() {
 		if err != nil {
-			// Flip back.
-			core.Flip()
-			_ = core.Close()
+			if plane != nil {
+				_ = plane.Close()
+			} else {
+				// Fallback cleanup if plane was not yet fully constructed.
+				for i := len(deferFuncs) - 1; i >= 0; i-- {
+					_ = deferFuncs[i]()
+				}
+				_ = core.Close()
+			}
 		}
 	}()
 
-	/// Bind to links. Binding should be advance of dialerGroups to avoid un-routable old connection.
+	// Bind to links.
 	// Bind to LAN
 	if len(global.LanInterface) > 0 {
 		if global.AutoConfigKernelParameter {
-			_ = SetIpv4forward("1")
-			_ = setForwarding("all", consts.IpVersionStr_6, "1")
+			// Enable IP forwarding for LAN interfaces
+			if err := SetIpv4forward("1"); err != nil {
+				// Log warning but don't fail - may be running in restricted environment (e.g., container)
+				log.WithError(err).Warnln("Failed to enable IPv4 forwarding; proxy functionality may be limited")
+			}
+			if err := setForwarding("all", consts.IpVersionStr_6, "1"); err != nil {
+				log.WithError(err).Warnln("Failed to enable IPv6 forwarding; proxy functionality may be limited")
+			}
 		}
 		global.LanInterface = common.Deduplicate(global.LanInterface)
 		for _, ifname := range global.LanInterface {
@@ -229,21 +489,26 @@ func NewControlPlane(
 		if err = core.setupSkPidMonitor(); err != nil {
 			log.WithError(err).Warnln("cgroup2 is not enabled; pname routing cannot be used")
 		}
+		if err = core.setupTCPRelayOffload(); err != nil {
+			log.WithError(err).Debugln("TCP relay eBPF offload disabled")
+		}
 		for _, ifname := range global.WanInterface {
 			if len(global.LanInterface) > 0 {
-				// FIXME: Code is not elegant here.
-				// bindLan setting conf.ipv6.all.forwarding=1 suppresses accept_ra=1,
-				// thus we set it 2 as a workaround.
-				// See https://sysctl-explorer.net/net/ipv6/accept_ra/ for more information.
+				// NOTE: Linux kernel behavior: ipv6.forwarding=1 suppresses accept_ra=1.
+				// We set accept_ra=2 to enable RA reception without auto-configuring
+				// default routes. This allows LAN+WAN coexistence with IPv6 SLAAC.
+				// Ref: https://sysctl-explorer.net/net/ipv6/accept_ra/
 				if global.AutoConfigKernelParameter {
 					acceptRa := sysctl.Keyf("net.ipv6.conf.%v.accept_ra", ifname)
-					val, _ := acceptRa.Get()
-					if val == "1" {
-						_ = acceptRa.Set("2", false)
+					val, err := acceptRa.Get()
+					if err == nil && val == "1" {
+						if err := acceptRa.Set("2", false); err != nil {
+							log.WithError(err).Warnf("Failed to set accept_ra=2 for %v; IPv6 autoconfig may not work as expected", ifname)
+						}
 					}
 				}
 			}
-			core.bindWan(ifname, global.AutoConfigKernelParameter)
+			core.bindWan(ifname)
 		}
 	}
 	// Bind to dae0 and dae0peer
@@ -256,6 +521,10 @@ func NewControlPlane(
 		log.Warnln("AllowInsecure is enabled, but it is not recommended. Please make sure you have to turn it on.")
 	}
 	option := dialer.NewGlobalOption(global, log)
+	option.DaeDNS, err = daedns.New(log, global, dnsConfig)
+	if err != nil {
+		return nil, err
+	}
 
 	// Dial mode.
 	dialMode, err := consts.ParseDialMode(global.DialMode)
@@ -287,7 +556,6 @@ func NewControlPlane(
 	}
 
 	// Filter out groups.
-	// FIXME: Ugly code here: reset grpc and meek clients manually.
 	grpc.CleanGlobalClientConnectionCache()
 	meek.CleanGlobalRoundTripperCache()
 	dialerSet := outbound.NewDialerSetFromLinks(option, tagToNodeList)
@@ -304,21 +572,22 @@ func NewControlPlane(
 			return nil, fmt.Errorf(`failed to create group "%v": %w`, group.Name, err)
 		}
 		// Convert node links to dialers.
-		log.Infof(`Group "%v" node list:`, group.Name)
-		for _, d := range dialers {
-			log.Infoln("\t" + d.Property().Name)
-		}
-		if len(dialers) == 0 {
-			log.Infoln("\t<Empty>")
+		if log.IsLevelEnabled(logrus.DebugLevel) {
+			log.Debugf(`Group "%v" node list:`, group.Name)
+			for _, d := range dialers {
+				log.Debugln("\t" + d.Property().Name)
+			}
+			if len(dialers) == 0 {
+				log.Debugln("\t<Empty>")
+			}
 		}
 		groupOption, err := ParseGroupOverrideOption(group, *global, log)
 		finalOption := option
 		if err == nil && groupOption != nil {
 			newDialers := make([]*dialer.Dialer, 0)
 			for _, d := range dialers {
-				newDialer := d.Clone()
+				newDialer := d.CloneWithGlobalOption(groupOption)
 				deferFuncs = append(deferFuncs, newDialer.Close)
-				newDialer.GlobalOption = groupOption
 				newDialers = append(newDialers, newDialer)
 			}
 			log.Infof(`Group "%v"'s check option has been override.`, group.Name)
@@ -329,6 +598,17 @@ func NewControlPlane(
 		dialerGroup := outbound.NewDialerGroup(finalOption, group.Name, dialers, annos, *policy,
 			core.outboundAliveChangeCallback(uint8(len(outbounds)), disableKernelAliveCallback))
 		outbounds = append(outbounds, dialerGroup)
+	}
+
+	registeredDialerCallbacks := make(map[*dialer.Dialer]struct{})
+	for _, group := range outbounds {
+		for _, d := range group.Dialers {
+			if _, ok := registeredDialerCallbacks[d]; ok {
+				continue
+			}
+			registeredDialerCallbacks[d] = struct{}{}
+			d.RegisterAliveTransitionCallback(core.dialerAliveTransitionCallback(d))
+		}
 	}
 
 	/// Routing.
@@ -345,6 +625,7 @@ func NewControlPlane(
 		outboundId2Name[uint8(i)] = o.Name
 	}
 	// Apply rules optimizers.
+	log.Infoln("Optimizing and loading routing rules (this may take a while for large rule sets)...")
 	locationFinder := assets.NewLocationFinder(externGeoDataDirs)
 	var rules []*config_parser.RoutingRule
 	if rules, err = routing.ApplyRulesOptimizers(routingA.Rules,
@@ -364,47 +645,91 @@ func NewControlPlane(
 		log.Debugf("RoutingA:\n%vfallback: %v\n", debugBuilder.String(), routingA.Fallback)
 	}
 	// Parse rules and build.
+	log.Infoln("Building routing matcher...")
 	builder, err := NewRoutingMatcherBuilder(log, rules, outboundName2Id, core.bpf, routingA.Fallback)
 	if err != nil {
 		return nil, fmt.Errorf("NewRoutingMatcherBuilder: %w", err)
 	}
+	log.Infoln("Loading routing rules into kernel space (BPF)...")
 	if err = builder.BuildKernspace(log); err != nil {
 		return nil, fmt.Errorf("RoutingMatcherBuilder.BuildKernspace: %w", err)
 	}
+	log.Infoln("Building userspace routing matcher...")
 	routingMatcher, err := builder.BuildUserspace()
 	if err != nil {
 		return nil, fmt.Errorf("RoutingMatcherBuilder.BuildUserspace: %w", err)
 	}
 
-	// New control plane.
-	ctx, cancel := context.WithCancel(context.Background())
-	plane := &ControlPlane{
-		log:               log,
-		core:              core,
-		deferFuncs:        deferFuncs,
-		listenIp:          "0.0.0.0",
-		outbounds:         outbounds,
-		dnsController:     nil,
-		onceNetworkReady:  sync.Once{},
-		dialMode:          dialMode,
-		routingMatcher:    routingMatcher,
-		ctx:               ctx,
-		cancel:            cancel,
-		ready:             make(chan struct{}),
-		muRealDomainSet:   sync.Mutex{},
-		realDomainSet:     bloom.NewWithEstimates(2048, 0.001),
-		lanInterface:      global.LanInterface,
-		wanInterface:      global.WanInterface,
-		sniffingTimeout:   sniffingTimeout,
-		tproxyPortProtect: global.TproxyPortProtect,
-		soMarkFromDae:     global.SoMarkFromDae,
-		mptcp:             global.Mptcp,
-	}
-	defer func() {
-		if err != nil {
-			cancel()
+	// Get referenced outbounds to limit health checks.
+	referencedOutbounds := builder.GetReferencedOutbounds()
+	if len(referencedOutbounds) > 0 {
+		var names []string
+		for name := range referencedOutbounds {
+			names = append(names, name)
 		}
-	}()
+		log.Infof("Health check will only verify %d outbounds referenced by routing rules: %v",
+			len(names), names)
+	} else {
+		log.Warnln("No outbounds referenced by routing rules; all outbounds will be health-checked")
+		// If no outbounds are referenced (e.g., all rules use logical operators),
+		// fall back to checking all outbounds to avoid breaking existing behavior.
+		for _, o := range outbounds {
+			referencedOutbounds[o.Name] = struct{}{}
+		}
+	}
+
+	// Routing compilation allocates large temporary slices and trie builders.
+	// Startup/reload is infrequent, so force a full scavenging pass here to
+	// return released pages before the control plane starts serving.
+	debug.FreeOSMemory()
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	log.Infof("Memory usage after routing build: Alloc=%vMiB, Sys=%vMiB, HeapObjects=%v",
+		m.Alloc/1024/1024, m.Sys/1024/1024, m.HeapObjects)
+
+	// New control plane.
+	cctx, cancel := context.WithCancel(ctx)
+	plane = &ControlPlane{
+		log:                    log,
+		core:                   core,
+		deferFuncs:             deferFuncs,
+		listenIp:               "0.0.0.0",
+		outbounds:              outbounds,
+		referencedOutbounds:    referencedOutbounds,
+		dnsController:          nil,
+		onceNetworkReady:       sync.Once{},
+		dialMode:               dialMode,
+		routingMatcher:         routingMatcher,
+		ctx:                    cctx,
+		cancel:                 cancel,
+		ready:                  make(chan struct{}),
+		muRealDomainSet:        sync.RWMutex{},
+		realDomainSet:          bloom.NewWithEstimates(2048, 0.001),
+		tcpSniffNegSet:         make(map[tcpSniffNegKey]tcpSniffNegEntry),
+		negJanitorStop:         make(chan struct{}),
+		negJanitorDone:         make(chan struct{}),
+		connStateJanitorStop:   make(chan struct{}),
+		connStateJanitorDone:   make(chan struct{}),
+		lanInterface:           global.LanInterface,
+		wanInterface:           global.WanInterface,
+		sniffingTimeout:        sniffingTimeout,
+		tproxyPortProtect:      global.TproxyPortProtect,
+		soMarkFromDae:          global.SoMarkFromDae,
+		mptcp:                  global.Mptcp,
+		bootstrapResolvers:     bootstrapResolvers,
+		udpRouteScopeSensitive: builder.UsesPacketMetadataRouting(),
+		udpUnorderedRunner:     newDefaultUdpUnorderedTaskRunner(cctx),
+		failedQuicDcidCache:    newFailedQuicDcidCache(failedQuicDcidCacheMaxEntries),
+	}
+	SetFailedQuicDcidCache(plane.failedQuicDcidCache)
+	SetAnyfromSoMark(global.SoMarkFromDae)
+	plane.startRealDomainNegJanitor()
+	plane.startConnStateJanitor()
+
+	var upstreamHostResolver func(ctx context.Context, host string, network string) (*netutils.Ip46, error, error)
+	if len(bootstrapResolvers) > 0 {
+		upstreamHostResolver = plane.resolveBootstrapIp46
+	}
 
 	/// DNS upstream.
 	dnsUpstream, err := dns.New(dnsConfig, &dns.NewOption{
@@ -412,6 +737,7 @@ func NewControlPlane(
 		LocationFinder:          locationFinder,
 		UpstreamReadyCallback:   plane.dnsUpstreamReadyCallback,
 		UpstreamResolverNetwork: common.MagicNetwork("udp", global.SoMarkFromDae, global.Mptcp),
+		UpstreamHostResolver:    upstreamHostResolver,
 	})
 	if err != nil {
 		return nil, err
@@ -421,8 +747,16 @@ func NewControlPlane(
 	if err != nil {
 		return nil, err
 	}
-	if plane.dnsController, err = NewDnsController(dnsUpstream, &DnsControllerOption{
-		Log: log,
+	plane.dnsController, err = NewDnsController(dnsUpstream, &DnsControllerOption{
+		Log:              log,
+		LifecycleContext: cctx,
+		// ConcurrencyLimit: use default (16384)
+		// Suitable for proxy scenarios with higher latency
+		// Each concurrent query uses ~4KB, so 16384 = ~64MB memory
+		ConcurrencyLimit:   0, // 0 means use default (16384)
+		OptimisticCache:    dnsConfig.OptimisticCache,
+		OptimisticCacheTtl: dnsConfig.OptimisticCacheTtl,
+		MaxCacheSize:       dnsConfig.MaxCacheSize,
 		CacheAccessCallback: func(cache *DnsCache) (err error) {
 			// Write mappings into eBPF map:
 			// IP record (from dns lookup) -> domain routing
@@ -431,17 +765,18 @@ func NewControlPlane(
 			}
 			return nil
 		},
-		CacheRemoveCallback: func(cache *DnsCache) (err error) {
-			// Write mappings into eBPF map:
-			// IP record (from dns lookup) -> domain routing
+		CacheDeleteCallback: func(cacheKey string, cache *DnsCache) (err error) {
+			_ = cacheKey
 			if err = core.BatchRemoveDomainRouting(cache); err != nil {
-				return fmt.Errorf("BatchUpdateDomainRouting: %w", err)
+				return fmt.Errorf("BatchRemoveDomainRouting: %w", err)
 			}
 			return nil
 		},
-		NewCache: func(fqdn string, answers []dnsmessage.RR, deadline time.Time, originalDeadline time.Time) (cache *DnsCache, err error) {
+		NewCache: func(fqdn string, answers, ns, extra []dnsmessage.RR, deadline time.Time, originalDeadline time.Time) (cache *DnsCache, err error) {
 			return &DnsCache{
 				DomainBitmap:     plane.routingMatcher.domainMatcher.MatchDomainBitmap(fqdn),
+				NS:               ns,
+				Extra:            extra,
 				Answer:           answers,
 				Deadline:         deadline,
 				OriginalDeadline: originalDeadline,
@@ -449,16 +784,63 @@ func NewControlPlane(
 		},
 		BestDialerChooser: plane.chooseBestDnsDialer,
 		TimeoutExceedCallback: func(dialArgument *dialArgument, err error) {
+			plane.penalizeDnsDialArg(dialArgument, time.Now())
+			if commonerrors.IsIgnorableConnectionError(err) {
+				return
+			}
+			if dialArgument == nil || dialArgument.l4proto == consts.L4ProtoStr_UDP {
+				return
+			}
 			dialArgument.bestDialer.ReportUnavailable(&dialer.NetworkType{
-				L4Proto:   dialArgument.l4proto,
-				IpVersion: dialArgument.ipversion,
-				IsDns:     true,
+				L4Proto:         dialArgument.l4proto,
+				IpVersion:       dialArgument.ipversion,
+				IsDns:           true,
+				UdpHealthDomain: dialer.UdpHealthDomainDns,
 			}, err)
 		},
 		IpVersionPrefer: dnsConfig.IpVersionPrefer,
 		FixedDomainTtl:  fixedDomainTtl,
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
+	}
+	plane.deferFuncs = append(plane.deferFuncs, plane.dnsController.Close)
+
+	// On reload, clear the BPF domain routing map to ensure DNS configuration
+	// changes take effect immediately. The dnsCache parameter is preserved for
+	// dae-wing compatibility but not used for cache refresh.
+	// TODO: Implement selective cache refresh based on what changed in DNS config.
+	if _bpf != nil {
+		// Keep reload behavior aligned with main: clear domain_routing_map only.
+		// Connection-state maps are intentionally preserved to avoid affecting
+		// established flows during reload.
+		if err = clearReloadDomainRoutingMap(core.bpf); err != nil {
+			return nil, fmt.Errorf("clearReloadDomainRoutingMap: %w", err)
+		}
+	}
+
+	// Restore DNS cache from last control plane if available.
+	if dnsCache != nil {
+		// Clear all global UDP state on reload so stale sockets and sniff sessions
+		// cannot leak pre-reload routing state into the new control plane.
+		resetGlobalUdpState()
+
+		count := 0
+		now := time.Now()
+		for k, v := range dnsCache {
+			if v != nil {
+				// Re-patch domain bitmap for new routing rules.
+				v.DomainBitmap = plane.routingMatcher.domainMatcher.MatchDomainBitmap(v.GetFqdn())
+				plane.dnsController.dnsCache.Store(k, v)
+				plane.dnsController.rememberDnsKnowledge(dnsCacheBaseKey(k), v.OriginalDeadline)
+				// Trigger async BPF update to populate the cleared domain_routing_map.
+				plane.dnsController.triggerBpfUpdateIfNeeded(v, now)
+				count++
+			}
+		}
+		if count > 0 {
+			log.Infof("Restored %d DNS cache entries from previous control plane", count)
+		}
 	}
 
 	// Create and start DNS listener if configured
@@ -472,39 +854,7 @@ func NewControlPlane(
 		} else {
 			log.Infof("DNS listener started on %s", dnsConfig.Bind)
 			// Add DNS listener stop to defer functions
-			deferFuncs = append(deferFuncs, plane.dnsListener.Stop)
-		}
-	}
-	// Refresh domain routing cache with new routing.
-	// FIXME: We temperarily disable it because we want to make change of DNS section take effects immediately.
-	// TODO: Add change detection.
-	if false && len(dnsCache) > 0 {
-		for cacheKey, cache := range dnsCache {
-			// Also refresh out-dated routing because kernel map items have no expiration.
-			lastDot := strings.LastIndex(cacheKey, ".")
-			if lastDot == -1 || lastDot == len(cacheKey)-1 {
-				// Not a valid key.
-				log.Warnln("Invalid cache key:", cacheKey)
-				continue
-			}
-			host := cacheKey[:lastDot]
-			_typ := cacheKey[lastDot+1:]
-			typ, err := strconv.ParseUint(_typ, 10, 16)
-			if err != nil {
-				// Unexpected.
-				return nil, err
-			}
-			_ = plane.dnsController.UpdateDnsCacheDeadline(host, uint16(typ), cache.Answer, cache.Deadline)
-		}
-	} else if _bpf != nil {
-		// Is reloading, and dnsCache == nil.
-		// Remove all map items.
-		// Normally, it is due to the change of ip version preference.
-		var key [4]uint32
-		var val bpfDomainRouting
-		iter := core.bpf.DomainRoutingMap.Iterate()
-		for iter.Next(&key, &val) {
-			_ = core.bpf.DomainRoutingMap.Delete(&key)
+			plane.deferFuncs = append(plane.deferFuncs, plane.dnsListener.Stop)
 		}
 	}
 
@@ -562,8 +912,46 @@ func ParseGroupOverrideOption(group config.Group, global config.Global, log *log
 	return nil, nil
 }
 
-// EjectBpf will resect bpf from destroying life-cycle of control plane.
+// clearReloadDomainRoutingMap keeps reload behavior aligned with main:
+// only clear domain_routing_map on reload.
+//
+// IMPORTANT:
+// Scheme3 (Embedded Design): Connection-state maps are preserved across in-process
+// reload by handing the live BPF objects to the new control plane. Do NOT clear
+// them here, otherwise established flows may lose cached state and get rerouted.
+func clearReloadDomainRoutingMap(bpf *bpfObjects) error {
+	return BpfMapDeleteAll[[4]uint32, bpfDomainRouting](bpf.DomainRoutingMap)
+}
+
+// validateRequiredBpfMapsLoaded checks maps that are required by both DNS and
+// non-DNS datapaths. DNS fast-path may skip per-flow entry updates, but these
+// map objects must always exist.
+func validateRequiredBpfMapsLoaded(bpf *bpfObjects) error {
+	if bpf == nil {
+		return fmt.Errorf("nil bpf objects")
+	}
+	required := []struct {
+		name string
+		m    *ebpf.Map
+	}{
+		{name: "domain_routing_map", m: bpf.DomainRoutingMap},
+		{name: "udp_conn_state_map", m: bpf.UdpConnStateMap},
+		{name: "routing_handoff_map", m: bpf.RoutingHandoffMap},
+		{name: "routing_map", m: bpf.RoutingMap},
+		{name: "routing_meta_map", m: bpf.RoutingMetaMap},
+	}
+	for _, r := range required {
+		if r.m == nil {
+			return fmt.Errorf("required map %q is nil", r.name)
+		}
+	}
+	return nil
+}
+
 func (c *ControlPlane) EjectBpf() *bpfObjects {
+	if c.core == nil {
+		return nil
+	}
 	return c.core.EjectBpf()
 }
 
@@ -571,10 +959,56 @@ func (c *ControlPlane) InjectBpf(bpf *bpfObjects) {
 	c.core.InjectBpf(bpf)
 }
 
+func (c *ControlPlane) currentBpf() *bpfObjects {
+	if c == nil || c.core == nil {
+		return nil
+	}
+	return c.core.PeekBpf()
+}
+
 func (c *ControlPlane) CloneDnsCache() map[string]*DnsCache {
-	c.dnsController.dnsCacheMu.Lock()
-	defer c.dnsController.dnsCacheMu.Unlock()
-	return deepcopy.Copy(c.dnsController.dnsCache).(map[string]*DnsCache)
+	if c == nil || c.dnsController == nil {
+		return nil
+	}
+	result := make(map[string]*DnsCache)
+	c.dnsController.dnsCache.Range(func(key, value any) bool {
+		k, ok1 := key.(string)
+		v, ok2 := value.(*DnsCache)
+		if ok1 && ok2 {
+			// Keep immutable DNS payload across generations while resetting
+			// generation-local routing sync state for reload.
+			result[k] = v.CloneForReload()
+		} else {
+			c.log.Errorf("CloneDnsCache: invalid type found in sync.Map: key=%T, value=%T", key, value)
+		}
+		return true
+	})
+	return result
+}
+
+func updateConnStateJanitorPressure(
+	state connStateJanitorPressureState,
+	overflowDelta bool,
+	maxUsagePercent int,
+) connStateJanitorPressureState {
+	if overflowDelta || maxUsagePercent >= connStateJanitorPressureEnterUsage {
+		state.active = true
+		state.belowThresholdRounds = 0
+		return state
+	}
+	if !state.active {
+		return state
+	}
+	if maxUsagePercent < connStateJanitorPressureExitUsage {
+		state.belowThresholdRounds++
+		if state.belowThresholdRounds >= connStateJanitorPressureExitRounds {
+			state.active = false
+			state.belowThresholdRounds = 0
+		}
+		return state
+	}
+	state.belowThresholdRounds = 0
+	return state
 }
 
 func (c *ControlPlane) dnsUpstreamReadyCallback(dnsUpstream *dns.Upstream) (err error) {
@@ -613,7 +1047,11 @@ func (c *ControlPlane) dnsUpstreamReadyCallback(dnsUpstream *dns.Upstream) (err 
 			},
 			A: dnsUpstream.Ip4.AsSlice(),
 		}}
-		if err = c.dnsController.UpdateDnsCacheDeadline(dnsUpstream.Hostname, typ, answers, deadline); err != nil {
+		ttl := int(time.Until(deadline).Seconds())
+		if ttl < 0 {
+			ttl = 0
+		}
+		if err = c.dnsController.UpdateDnsCacheTtl(dnsUpstream.Hostname, typ, answers, nil, nil, ttl); err != nil {
 			return err
 		}
 	}
@@ -629,7 +1067,11 @@ func (c *ControlPlane) dnsUpstreamReadyCallback(dnsUpstream *dns.Upstream) (err 
 			},
 			AAAA: dnsUpstream.Ip6.AsSlice(),
 		}}
-		if err = c.dnsController.UpdateDnsCacheDeadline(dnsUpstream.Hostname, typ, answers, deadline); err != nil {
+		ttl := int(time.Until(deadline).Seconds())
+		if ttl < 0 {
+			ttl = 0
+		}
+		if err = c.dnsController.UpdateDnsCacheTtl(dnsUpstream.Hostname, typ, answers, nil, nil, ttl); err != nil {
 			return err
 		}
 	}
@@ -638,11 +1080,24 @@ func (c *ControlPlane) dnsUpstreamReadyCallback(dnsUpstream *dns.Upstream) (err 
 
 func (c *ControlPlane) ActivateCheck() {
 	for _, g := range c.outbounds {
+		// Only activate health checks for outbounds referenced by routing rules.
+		// This significantly reduces startup time when subscription has many nodes
+		// but only a few groups are actually used in routing.
+		if _, referenced := c.referencedOutbounds[g.Name]; !referenced {
+			c.log.Debugf("Skip health check for unreferenced outbound: %v", g.Name)
+			continue
+		}
 		for _, d := range g.Dialers {
 			// We only activate check of nodes that have a group.
 			d.ActivateCheck()
 		}
 	}
+}
+
+// OnHealthCheckSuccess is called when a dialer passes health check.
+// This clears the failed QUIC DCID cache since network conditions may have improved.
+func (c *ControlPlane) OnHealthCheckSuccess() {
+	ClearFailedQuicDcids()
 }
 
 func (c *ControlPlane) ChooseDialTarget(outbound consts.OutboundIndex, dst netip.AddrPort, domain string) (dialTarget string, shouldReroute bool, dialIp bool) {
@@ -651,40 +1106,25 @@ func (c *ControlPlane) ChooseDialTarget(outbound consts.OutboundIndex, dst netip
 	if !outbound.IsReserved() && domain != "" {
 		switch c.dialMode {
 		case consts.DialMode_Domain:
-			if cache := c.dnsController.LookupDnsRespCache(c.dnsController.cacheKey(domain, common.AddrToDnsType(dst.Addr())), true); cache != nil {
+			// Avoid blocking probe for literal IP / host:port values.
+			if isIPLikeDomain(domain) {
+				break
+			}
+			if c.dnsController.HasDnsKnowledge(c.dnsController.cacheKey(domain, common.AddrToDnsType(dst.Addr()))) {
 				// Has A/AAAA records. It is a real domain.
 				dialMode = consts.DialMode_Domain
+				shouldReroute = true
 			} else {
-				// Check if the domain is in real-domain set (bloom filter).
-				c.muRealDomainSet.Lock()
-				if c.realDomainSet.TestString(domain) {
-					c.muRealDomainSet.Unlock()
-					dialMode = consts.DialMode_Domain
-
-					// Should use this domain to reroute
-					shouldReroute = true
-				} else {
-					c.muRealDomainSet.Unlock()
-					// Lookup A/AAAA to make sure it is a real domain.
-					ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Second)
-					defer cancel()
-					// TODO: use DNS controller and re-route by control plane.
-					systemDns, err := netutils.SystemDns()
-					if err == nil {
-						if ip46, _, _ := netutils.ResolveIp46(ctx, direct.SymmetricDirect, systemDns, domain, common.MagicNetwork("udp", c.soMarkFromDae, c.mptcp), true); ip46.Ip4.IsValid() || ip46.Ip6.IsValid() {
-							// Has A/AAAA records. It is a real domain.
-							dialMode = consts.DialMode_Domain
-							// Add it to real-domain set.
-							c.muRealDomainSet.Lock()
-							c.realDomainSet.AddString(domain)
-							c.muRealDomainSet.Unlock()
-
-							// Should use this domain to reroute
-							shouldReroute = true
-						}
+				if known, real := c.lookupRealDomainCache(domain); known {
+					if real {
+						dialMode = consts.DialMode_Domain
+						shouldReroute = true
 					}
+				} else {
+					// Unknown domain on first hit: warm it asynchronously to avoid
+					// blocking connection setup on webpage first paint path.
+					c.triggerRealDomainProbe(domain)
 				}
-
 			}
 		case consts.DialMode_DomainCao:
 			shouldReroute = true
@@ -714,57 +1154,1314 @@ func (c *ControlPlane) ChooseDialTarget(outbound consts.OutboundIndex, dst netip
 		} else {
 			dialTarget = net.JoinHostPort(domain, strconv.Itoa(int(dst.Port())))
 		}
-		c.log.WithFields(logrus.Fields{
-			"from": dst.String(),
-			"to":   dialTarget,
-		}).Debugln("Rewrite dial target to domain")
+		if c.log.IsLevelEnabled(logrus.DebugLevel) {
+			c.log.WithFields(logrus.Fields{
+				"from": dst.String(),
+				"to":   dialTarget,
+			}).Debugln("Rewrite dial target to domain")
+		}
 	}
 	return dialTarget, shouldReroute, dialIp
 }
 
+func (c *ControlPlane) lookupRealDomainCache(domain string) (known bool, real bool) {
+	// Read-mostly fast path.
+	c.muRealDomainSet.RLock()
+	hit := c.realDomainSet.TestString(domain)
+	c.muRealDomainSet.RUnlock()
+	if hit {
+		return true, true
+	}
+
+	// Negative-cache fast path.
+	now := time.Now()
+	if v, ok := c.realDomainNegSet.Load(domain); ok {
+		expiresAt, _ := v.(int64)
+		if now.UnixNano() < expiresAt {
+			return true, false
+		}
+		c.realDomainNegSet.Delete(domain)
+	}
+	return false, false
+}
+
+func (c *ControlPlane) resolveBootstrapIp46(ctx context.Context, host string, network string) (*netutils.Ip46, error, error) {
+	if len(c.bootstrapResolvers) == 0 {
+		err := fmt.Errorf("bootstrap resolver is not configured")
+		return &netutils.Ip46{}, err, err
+	}
+	return c.resolveIp46WithBootstrapResolvers(ctx, host, network, false, resolveIp46ForBootstrap)
+}
+
+func (c *ControlPlane) triggerRealDomainProbe(domain string) {
+	if domain == "" || isIPLikeDomain(domain) {
+		return
+	}
+	if known, _ := c.lookupRealDomainCache(domain); known {
+		return
+	}
+	go func() {
+		_, _, _ = c.realDomainProbeS.Do(domain, func() (any, error) {
+			return c.probeAndUpdateRealDomain(domain), nil
+		})
+	}()
+}
+
+func (c *ControlPlane) isRealDomain(domain string) bool {
+	if known, real := c.lookupRealDomainCache(domain); known {
+		return real
+	}
+
+	// Deduplicate concurrent probes for same domain to avoid stampede under bursty connection setup.
+	v, _, _ := c.realDomainProbeS.Do(domain, func() (any, error) {
+		return c.probeAndUpdateRealDomain(domain), nil
+	})
+	isReal, _ := v.(bool)
+	return isReal
+}
+
+func (c *ControlPlane) probeAndUpdateRealDomain(domain string) bool {
+	if known, real := c.lookupRealDomainCache(domain); known {
+		return real
+	}
+
+	now := time.Now()
+	// Use ControlPlane's context for real domain probe to enable proper cancel propagation
+	ctx, cancel := context.WithTimeout(c.ctx, realDomainProbeTimeout)
+	defer cancel()
+
+	if len(c.bootstrapResolvers) == 0 {
+		// Fail closed when no bootstrap resolver is configured.
+		return false
+	}
+
+	ip46, err4, err6 := c.resolveIp46WithBootstrapResolvers(
+		ctx,
+		domain,
+		common.MagicNetwork("udp", c.soMarkFromDae, c.mptcp),
+		true,
+		resolveIp46ForRealDomainProbe,
+	)
+	if err4 != nil && err6 != nil {
+		// Probe failed for both families; avoid sticky false negatives.
+		return false
+	}
+	if !ip46.Ip4.IsValid() && !ip46.Ip6.IsValid() {
+		c.realDomainNegSet.Store(domain, now.Add(realDomainNegativeCacheTTL).UnixNano())
+		return false
+	}
+
+	c.muRealDomainSet.Lock()
+	c.realDomainSet.AddString(domain)
+	c.muRealDomainSet.Unlock()
+	c.realDomainNegSet.Delete(domain)
+	return true
+}
+
+func (c *ControlPlane) resolveIp46WithBootstrapResolvers(
+	ctx context.Context,
+	host string,
+	network string,
+	race bool,
+	resolve func(context.Context, netproxy.Dialer, netip.AddrPort, string, string, bool) (*netutils.Ip46, error, error),
+) (*netutils.Ip46, error, error) {
+	if len(c.bootstrapResolvers) == 0 {
+		err := fmt.Errorf("bootstrap resolver is not configured")
+		return &netutils.Ip46{}, err, err
+	}
+
+	var firstErr4 error
+	var firstErr6 error
+	var lastNoRecord *netutils.Ip46
+	var lastNoRecordErr4 error
+	var lastNoRecordErr6 error
+	for _, resolver := range c.bootstrapResolvers {
+		ip46, err4, err6 := resolve(ctx, direct.SymmetricDirect, resolver, host, network, race)
+		if ip46 == nil {
+			ip46 = &netutils.Ip46{}
+		}
+		if ip46.Ip4.IsValid() || ip46.Ip6.IsValid() {
+			return ip46, err4, err6
+		}
+		if err4 == nil || err6 == nil {
+			lastNoRecord = ip46
+			lastNoRecordErr4 = err4
+			lastNoRecordErr6 = err6
+			continue
+		}
+		if firstErr4 == nil {
+			firstErr4 = err4
+		}
+		if firstErr6 == nil {
+			firstErr6 = err6
+		}
+	}
+	if lastNoRecord != nil {
+		return lastNoRecord, lastNoRecordErr4, lastNoRecordErr6
+	}
+	if firstErr4 == nil {
+		firstErr4 = fmt.Errorf("bootstrap resolver failed")
+	}
+	if firstErr6 == nil {
+		firstErr6 = firstErr4
+	}
+	return &netutils.Ip46{}, firstErr4, firstErr6
+}
+
+func (c *ControlPlane) cleanupNegativeCaches(now time.Time) {
+	nowNano := now.UnixNano()
+
+	// 1. Cleanup real domain negative cache
+	c.realDomainNegSet.Range(func(key, value interface{}) bool {
+		expiresAt, ok := value.(int64)
+		if !ok || nowNano >= expiresAt {
+			c.realDomainNegSet.Delete(key)
+		}
+		return true
+	})
+
+	// 2. Cleanup QUIC DCID negative cache
+	c.failedQuicDcidCache.CleanupExpired(now)
+
+	// 3. Cleanup TCP sniff negative cache
+	c.cleanupTcpSniffNegative(now)
+}
+
+type dnsDialerSnapshotKey struct {
+	realSrc      netip.AddrPort
+	upstream     string
+	upstreamIp4  netip.Addr
+	upstreamIp6  netip.Addr
+	routingPname [16]uint8
+	routingMac   [6]uint8
+	routingDscp  uint8
+}
+
+type dnsDialerSnapshotEntry struct {
+	expiresAtUnixNano int64
+	dialArg           dialArgument
+}
+
+type dnsDialerPenaltyKey struct {
+	dialer    *dialer.Dialer
+	target    netip.AddrPort
+	l4proto   consts.L4ProtoStr
+	ipversion consts.IpVersionStr
+}
+
+type dnsDialerPenaltyEntry struct {
+	expiresAtUnixNano int64
+}
+
+func buildDnsDialerSnapshotKey(req *udpRequest, upstream *dns.Upstream) (dnsDialerSnapshotKey, bool) {
+	if req == nil || upstream == nil {
+		return dnsDialerSnapshotKey{}, false
+	}
+
+	realSrc := req.realSrc
+	// DNS fast path: exempt source port from cache key to enable cache reuse.
+	// DNS queries use random source ports; including the port would completely invalidate the cache.
+	// Routing decisions do not depend on the DNS query's source port (port is only for transport layer multiplexing).
+	if req.realDst.Port() == 53 {
+		realSrc = netip.AddrPortFrom(req.realSrc.Addr(), 0)
+	}
+
+	key := dnsDialerSnapshotKey{
+		realSrc:     realSrc,
+		upstream:    upstream.String(),
+		upstreamIp4: upstream.Ip4,
+		upstreamIp6: upstream.Ip6,
+	}
+
+	if req.routingResult != nil {
+		key.routingPname = req.routingResult.Pname
+		key.routingMac = req.routingResult.Mac
+		key.routingDscp = req.routingResult.Dscp
+	}
+
+	return key, true
+}
+
+func (c *ControlPlane) loadDnsDialerSnapshot(key dnsDialerSnapshotKey, now time.Time) (*dialArgument, bool) {
+	if dnsDialerSnapshotTTL <= 0 {
+		return nil, false
+	}
+
+	v, ok := c.dnsDialerSnapshot.Load(key)
+	if !ok {
+		return nil, false
+	}
+
+	entry, ok := v.(*dnsDialerSnapshotEntry)
+	if !ok {
+		c.dnsDialerSnapshot.Delete(key)
+		return nil, false
+	}
+
+	if entry.expiresAtUnixNano <= now.UnixNano() {
+		c.dnsDialerSnapshot.CompareAndDelete(key, entry)
+		return nil, false
+	}
+
+	dialArg := entry.dialArg
+	if c.isDnsDialArgPenalized(&dialArg, now) {
+		c.dnsDialerSnapshot.CompareAndDelete(key, entry)
+		return nil, false
+	}
+	return &dialArg, true
+}
+
+func (c *ControlPlane) storeDnsDialerSnapshot(key dnsDialerSnapshotKey, dialArg *dialArgument, now time.Time) {
+	if dnsDialerSnapshotTTL <= 0 || dialArg == nil {
+		return
+	}
+	entry := &dnsDialerSnapshotEntry{
+		expiresAtUnixNano: now.Add(dnsDialerSnapshotTTL).UnixNano(),
+		dialArg:           *dialArg,
+	}
+	c.dnsDialerSnapshot.Store(key, entry)
+}
+
+func (c *ControlPlane) cleanupDnsDialerSnapshot(now time.Time) {
+	nowNano := now.UnixNano()
+	c.dnsDialerSnapshot.Range(func(key, value any) bool {
+		entry, ok := value.(*dnsDialerSnapshotEntry)
+		if !ok {
+			c.dnsDialerSnapshot.Delete(key)
+			return true
+		}
+		if entry.expiresAtUnixNano <= nowNano {
+			c.dnsDialerSnapshot.CompareAndDelete(key, entry)
+		}
+		return true
+	})
+}
+
+func (c *ControlPlane) cleanupDnsDialerPenalty(now time.Time) {
+	nowNano := now.UnixNano()
+	c.dnsDialerPenalty.Range(func(key, value any) bool {
+		entry, ok := value.(*dnsDialerPenaltyEntry)
+		if !ok {
+			c.dnsDialerPenalty.Delete(key)
+			return true
+		}
+		if entry.expiresAtUnixNano <= nowNano {
+			c.dnsDialerPenalty.CompareAndDelete(key, entry)
+		}
+		return true
+	})
+}
+
+func buildDnsDialerPenaltyKey(dialArg *dialArgument) (dnsDialerPenaltyKey, bool) {
+	if dialArg == nil || dialArg.bestDialer == nil || !dialArg.bestTarget.IsValid() {
+		return dnsDialerPenaltyKey{}, false
+	}
+	return dnsDialerPenaltyKey{
+		dialer:    dialArg.bestDialer,
+		target:    dialArg.bestTarget,
+		l4proto:   dialArg.l4proto,
+		ipversion: dialArg.ipversion,
+	}, true
+}
+
+func (c *ControlPlane) isDnsDialArgPenalized(dialArg *dialArgument, now time.Time) bool {
+	key, ok := buildDnsDialerPenaltyKey(dialArg)
+	if !ok {
+		return false
+	}
+	value, ok := c.dnsDialerPenalty.Load(key)
+	if !ok {
+		return false
+	}
+	entry, ok := value.(*dnsDialerPenaltyEntry)
+	if !ok {
+		c.dnsDialerPenalty.Delete(key)
+		return false
+	}
+	if entry.expiresAtUnixNano <= now.UnixNano() {
+		c.dnsDialerPenalty.CompareAndDelete(key, entry)
+		return false
+	}
+	return true
+}
+
+func (c *ControlPlane) penalizeDnsDialArg(dialArg *dialArgument, now time.Time) {
+	if dnsDialerPenaltyTTL <= 0 {
+		return
+	}
+	key, ok := buildDnsDialerPenaltyKey(dialArg)
+	if !ok {
+		return
+	}
+	c.dnsDialerPenalty.Store(key, &dnsDialerPenaltyEntry{
+		expiresAtUnixNano: now.Add(dnsDialerPenaltyTTL).UnixNano(),
+	})
+}
+
+func (c *ControlPlane) startRealDomainNegJanitor() {
+	go func() {
+		ticker := time.NewTicker(realDomainNegJanitorInterval)
+		defer ticker.Stop()
+		defer close(c.negJanitorDone)
+		for {
+			select {
+			case <-c.negJanitorStop:
+				return
+			case now := <-ticker.C:
+				c.cleanupNegativeCaches(now)
+				c.cleanupDnsDialerSnapshot(now)
+				c.cleanupDnsDialerPenalty(now)
+			}
+		}
+	}()
+}
+
+func (c *ControlPlane) stopRealDomainNegJanitor() {
+	c.negJanitorOnce.Do(func() {
+		if c.negJanitorStop != nil {
+			close(c.negJanitorStop)
+		}
+		if c.negJanitorDone != nil {
+			timer := time.NewTimer(gracefulShutdownWaitTimeout)
+			defer timer.Stop()
+			select {
+			case <-c.negJanitorDone:
+			case <-timer.C:
+				c.log.Warn("stopRealDomainNegJanitor: timeout waiting for janitor to exit")
+			}
+		}
+	})
+}
+
+// startConnStateJanitor runs a periodic goroutine that cleans up expired
+// UDP and TCP connection state entries from the eBPF maps. This replaces the
+// former bpf_timer-based automatic cleanup, providing better hot path performance
+// and avoiding CVE-2024-41045.
+func (c *ControlPlane) startConnStateJanitor() {
+	go func() {
+		ticker := time.NewTicker(connStateJanitorPressureInterval)
+		defer ticker.Stop()
+		defer close(c.connStateJanitorDone)
+
+		var (
+			lastConnCleanup      time.Time
+			lastRedirectCleanup  time.Time
+			lastCookiePidCleanup time.Time
+			lastRoutingHandoff   time.Time
+			lastHealthCheck      time.Time
+			pressureState        connStateJanitorPressureState
+		)
+
+		for {
+			select {
+			case <-c.connStateJanitorStop:
+				return
+			case now := <-ticker.C:
+				bpf := c.currentBpf()
+
+				overflowDelta := false
+				if bpf != nil && bpf.BpfStatsMap != nil {
+					udpOverflow, tcpOverflow := c.readMapOverflowCounters(bpf.BpfStatsMap)
+					overflowDelta = udpOverflow > pressureState.lastUdpOverflow ||
+						tcpOverflow > pressureState.lastTcpOverflow
+					pressureState.lastUdpOverflow = udpOverflow
+					pressureState.lastTcpOverflow = tcpOverflow
+				}
+				if overflowDelta {
+					pressureState.active = true
+					pressureState.belowThresholdRounds = 0
+				}
+
+				connCleanupInterval := connStateJanitorSteadyInterval
+				redirectCleanupInterval := redirectTrackJanitorSteadyInterval
+				if pressureState.active {
+					connCleanupInterval = connStateJanitorPressureInterval
+					redirectCleanupInterval = redirectTrackJanitorPressureInterval
+				}
+
+				if lastRedirectCleanup.IsZero() || now.Sub(lastRedirectCleanup) >= redirectCleanupInterval {
+					c.cleanupRedirectTrackMap()
+					lastRedirectCleanup = now
+				}
+				if lastCookiePidCleanup.IsZero() || now.Sub(lastCookiePidCleanup) >= redirectCleanupInterval {
+					c.cleanupCookiePidMap()
+					lastCookiePidCleanup = now
+				}
+				routingHandoffInterval := routingHandoffSteadyInterval
+				if pressureState.active {
+					routingHandoffInterval = routingHandoffPressureInterval
+				}
+				if lastRoutingHandoff.IsZero() || now.Sub(lastRoutingHandoff) >= routingHandoffInterval {
+					c.cleanupRoutingHandoffMap()
+					lastRoutingHandoff = now
+				}
+
+				if lastConnCleanup.IsZero() || now.Sub(lastConnCleanup) >= connCleanupInterval {
+					udpStats := c.cleanupUdpConnStateMap(pressureState.active)
+					tcpStats := c.cleanupTcpConnStateMap(pressureState.active)
+
+					maxUsagePercent := udpStats.usagePercent
+					if tcpStats.usagePercent > maxUsagePercent {
+						maxUsagePercent = tcpStats.usagePercent
+					}
+					pressureState = updateConnStateJanitorPressure(pressureState, overflowDelta, maxUsagePercent)
+					lastConnCleanup = now
+				}
+
+				if lastHealthCheck.IsZero() || now.Sub(lastHealthCheck) >= 5*time.Second {
+					c.checkBpfMapHealth()
+					lastHealthCheck = now
+				}
+			}
+		}
+	}()
+}
+
+// stopConnStateJanitor signals the conn state janitor to stop and waits
+// for it to exit gracefully.
+func (c *ControlPlane) stopConnStateJanitor() {
+	c.connStateJanitorOnce.Do(func() {
+		if c.connStateJanitorStop != nil {
+			close(c.connStateJanitorStop)
+		}
+		if c.connStateJanitorDone != nil {
+			timer := time.NewTimer(gracefulShutdownWaitTimeout)
+			defer timer.Stop()
+			select {
+			case <-c.connStateJanitorDone:
+			case <-timer.C:
+				c.log.Warn("stopConnStateJanitor: timeout waiting for janitor to exit")
+			}
+		}
+	})
+}
+
+// redirectTrackTimeout is the TTL for redirect entries.
+// Redirect entries track which interface and MAC addresses to use for reply traffic.
+// A longer timeout is acceptable because these entries are small and the consequence
+// of stale entries is minimal (wrong MAC address causes one packet to be misdirected).
+const redirectTrackTimeout = 5 * time.Minute
+
+// cleanupRedirectTrackMap iterates through the redirect track map and removes
+// entries that haven't been accessed within redirectTrackTimeout.
+// This is necessary because redirect_track uses HASH (not LRU) to avoid
+// the problem where long-lived connections prevent cleanup of other entries.
+func (c *ControlPlane) cleanupRedirectTrackMap() {
+	// Check if we're shutting down - if stop signal is sent, skip cleanup
+	select {
+	case <-c.connStateJanitorStop:
+		return
+	default:
+	}
+
+	bpf := c.currentBpf()
+	if bpf == nil || bpf.RedirectTrack == nil {
+		return
+	}
+
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
+		c.log.Errorf("cleanupRedirectTrackMap: failed to get monotonic time: %v", err)
+		return
+	}
+	nowNano := ts.Nano()
+
+	timeoutNano := redirectTrackTimeout.Nanoseconds()
+
+	scratch := c.connStateJanitorScratch()
+	keysToDelete := takeJanitorDeleteScratch(scratch.redirectDelete)
+	totalEntries := 0
+	maxAge := int64(0)
+	totalAge := int64(0)
+
+	keysOut := ensureJanitorLookupScratch(scratch.redirectKeys)
+	valuesOut := ensureJanitorLookupScratch(scratch.redirectValues)
+	defer func() {
+		scratch.redirectDelete = keepJanitorDeleteScratch(keysToDelete)
+		scratch.redirectKeys = keysOut
+		scratch.redirectValues = valuesOut
+	}()
+
+	var cursor ebpf.MapBatchCursor
+	for {
+		count, err := bpf.RedirectTrack.BatchLookup(&cursor, keysOut, valuesOut, nil)
+		if count > 0 {
+			for i := 0; i < count; i++ {
+				key := keysOut[i]
+				value := valuesOut[i]
+				totalEntries++
+				age := nowNano - int64(value.LastSeenNs)
+				totalAge += age
+				if age > maxAge {
+					maxAge = age
+				}
+				if age > timeoutNano {
+					keysToDelete = append(keysToDelete, key)
+				}
+			}
+		}
+		if err != nil {
+			if !strings.Contains(err.Error(), "bad file descriptor") &&
+				!strings.Contains(err.Error(), "file descriptor") &&
+				!strings.Contains(err.Error(), "closed") && !strings.Contains(err.Error(), "key does not exist") {
+				c.log.Errorf("cleanupRedirectTrackMap: BatchLookup error: %v", err)
+			}
+			break
+		}
+	}
+
+	if len(keysToDelete) > 0 {
+		if _, err := BpfMapBatchDelete(bpf.RedirectTrack, keysToDelete); err != nil {
+			c.log.Debugf("cleanupRedirectTrackMap: batch delete error: %v", err)
+		}
+	}
+
+	// Only log when there are actual changes
+	if len(keysToDelete) > 0 {
+		c.log.Debugf("cleanupRedirectTrackMap: removed %d entries", len(keysToDelete))
+	}
+
+	// Alert if map usage is high
+	const redirectTrackCapacity = 65536
+	if totalEntries > 0 {
+		usagePercent := float64(totalEntries) / float64(redirectTrackCapacity) * 100
+		if usagePercent > 90 {
+			c.log.Warnf("cleanupRedirectTrackMap: map at %.1f%% capacity (%d entries)",
+				usagePercent, totalEntries)
+		}
+	}
+}
+
+// cleanupCookiePidMap removes stale cookie->pid metadata that escaped the
+// cgroup sock_release backstop. Active sockets refresh last_seen_ns in BPF.
+func (c *ControlPlane) cleanupCookiePidMap() {
+	select {
+	case <-c.connStateJanitorStop:
+		return
+	default:
+	}
+
+	bpf := c.currentBpf()
+	if bpf == nil || bpf.CookiePidMap == nil {
+		return
+	}
+
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
+		c.log.Errorf("cleanupCookiePidMap: failed to get monotonic time: %v", err)
+		return
+	}
+	nowNano := ts.Nano()
+	timeoutNano := cookiePidMapTimeout.Nanoseconds()
+
+	scratch := c.connStateJanitorScratch()
+	keysToDelete := takeJanitorDeleteScratch(scratch.cookiePidDelete)
+	keysOut := ensureJanitorLookupScratch(scratch.cookiePidKeys)
+	valuesOut := ensureJanitorLookupScratch(scratch.cookiePidValues)
+	totalEntries := 0
+	defer func() {
+		scratch.cookiePidDelete = keepJanitorDeleteScratch(keysToDelete)
+		scratch.cookiePidKeys = keysOut
+		scratch.cookiePidValues = valuesOut
+	}()
+
+	var cursor ebpf.MapBatchCursor
+	for {
+		count, err := bpf.CookiePidMap.BatchLookup(&cursor, keysOut, valuesOut, nil)
+		if count > 0 {
+			for i := 0; i < count; i++ {
+				totalEntries++
+				age := nowNano - int64(valuesOut[i].LastSeenNs)
+				if age > timeoutNano {
+					keysToDelete = append(keysToDelete, keysOut[i])
+				}
+			}
+		}
+		if err != nil {
+			if !strings.Contains(err.Error(), "bad file descriptor") &&
+				!strings.Contains(err.Error(), "file descriptor") &&
+				!strings.Contains(err.Error(), "closed") && !strings.Contains(err.Error(), "key does not exist") {
+				c.log.Errorf("cleanupCookiePidMap: BatchLookup error: %v", err)
+			}
+			break
+		}
+	}
+
+	if len(keysToDelete) > 0 {
+		if _, err := BpfMapBatchDelete(bpf.CookiePidMap, keysToDelete); err != nil {
+			c.log.Debugf("cleanupCookiePidMap: batch delete error: %v", err)
+		}
+		c.log.Debugf("cleanupCookiePidMap: removed %d entries", len(keysToDelete))
+	}
+
+	maxEntries := bpf.CookiePidMap.MaxEntries()
+	if totalEntries > 0 && maxEntries > 0 {
+		usagePercent := float64(totalEntries) / float64(maxEntries) * 100
+		if usagePercent > 90 {
+			c.log.Warnf("cleanupCookiePidMap: map at %.1f%% capacity (%d entries)", usagePercent, totalEntries)
+		}
+	}
+}
+
+// cleanupRoutingHandoffMap removes expired tuple-miss routing metadata entries.
+// The handoff map is a short-lived bridge for userspace consumers that miss the
+// authoritative conn-state publication window.
+func (c *ControlPlane) cleanupRoutingHandoffMap() {
+	select {
+	case <-c.connStateJanitorStop:
+		return
+	default:
+	}
+
+	bpf := c.currentBpf()
+	if bpf == nil || bpf.RoutingHandoffMap == nil {
+		return
+	}
+
+	nowNano, err := monotonicNowNano()
+	if err != nil {
+		c.log.Errorf("cleanupRoutingHandoffMap: failed to get monotonic time: %v", err)
+		return
+	}
+
+	scratch := c.connStateJanitorScratch()
+	keysToDelete := takeJanitorDeleteScratch(scratch.routingHandoffDelete)
+	keysOut := ensureJanitorLookupScratch(scratch.routingHandoffKeys)
+	valuesOut := ensureJanitorLookupScratch(scratch.routingHandoffValues)
+	totalEntries := 0
+	defer func() {
+		scratch.routingHandoffDelete = keepJanitorDeleteScratch(keysToDelete)
+		scratch.routingHandoffKeys = keysOut
+		scratch.routingHandoffValues = valuesOut
+	}()
+
+	var cursor ebpf.MapBatchCursor
+	for {
+		count, batchErr := bpf.RoutingHandoffMap.BatchLookup(&cursor, keysOut, valuesOut, nil)
+		if count > 0 {
+			for i := 0; i < count; i++ {
+				totalEntries++
+				if routingHandoffExpired(nowNano, valuesOut[i].LastSeenNs) {
+					keysToDelete = append(keysToDelete, keysOut[i])
+				}
+			}
+		}
+		if batchErr != nil {
+			if !strings.Contains(batchErr.Error(), "bad file descriptor") &&
+				!strings.Contains(batchErr.Error(), "file descriptor") &&
+				!strings.Contains(batchErr.Error(), "closed") &&
+				!strings.Contains(batchErr.Error(), "key does not exist") {
+				c.log.Errorf("cleanupRoutingHandoffMap: BatchLookup error: %v", batchErr)
+			}
+			break
+		}
+	}
+
+	if len(keysToDelete) > 0 {
+		if _, deleteErr := BpfMapBatchDelete(bpf.RoutingHandoffMap, keysToDelete); deleteErr != nil {
+			c.log.Debugf("cleanupRoutingHandoffMap: batch delete error: %v", deleteErr)
+		}
+		c.log.Debugf("cleanupRoutingHandoffMap: removed %d expired entries", len(keysToDelete))
+	}
+
+	maxEntries := bpf.RoutingHandoffMap.MaxEntries()
+	if totalEntries > 0 && maxEntries > 0 {
+		usagePercent := float64(totalEntries) / float64(maxEntries) * 100
+		if usagePercent > 90 {
+			c.log.Warnf("cleanupRoutingHandoffMap: map at %.1f%% capacity (%d entries)", usagePercent, totalEntries)
+		}
+	}
+}
+
+// cleanupUdpConnStateMap iterates through the UDP conn state map and removes
+// cold entries that escaped endpoint-owned teardown.
+// DNS entries use a shorter timeout (17s) while non-DNS UDP keeps a longer
+// backstop timeout so datapath-only tuples still age out after crashes/reload races.
+// When map is under pressure (high usage), timeouts are dynamically reduced
+// to free up space more aggressively in a single pass.
+func (c *ControlPlane) cleanupUdpConnStateMap(aggressiveCleanup bool) mapCleanupStats {
+	stats := mapCleanupStats{}
+
+	// Check if we're shutting down - if stop signal is sent, skip cleanup
+	select {
+	case <-c.connStateJanitorStop:
+		return stats
+	default:
+	}
+
+	bpf := c.currentBpf()
+	if bpf == nil || bpf.UdpConnStateMap == nil {
+		return stats
+	}
+
+	// Use CLOCK_MONOTONIC to match bpf_ktime_get_ns() time base.
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
+		c.log.Errorf("cleanupUdpConnStateMap: failed to get monotonic time: %v", err)
+		return stats
+	}
+	nowNano := ts.Nano()
+
+	// Default timeouts
+	dnsTimeoutNano := udpConnStateTimeoutDNS.Nanoseconds()
+	normalTimeoutNano := QuicNatTimeout.Nanoseconds() // Align eBPF state with Userspace proxy QuicNatTimeout
+
+	scratch := c.connStateJanitorScratch()
+	keysToDelete := takeJanitorDeleteScratch(scratch.udpDelete)
+	keysOut := ensureJanitorLookupScratch(scratch.udpKeys)
+	valuesOut := ensureJanitorLookupScratch(scratch.udpValues)
+	defer func() {
+		scratch.udpDelete = keepJanitorDeleteScratch(keysToDelete)
+		scratch.udpKeys = keysOut
+		scratch.udpValues = valuesOut
+	}()
+
+	var cursor ebpf.MapBatchCursor
+	aggressiveTimeout := normalTimeoutNano / 2
+	aggressiveDnsTimeout := dnsTimeoutNano / 2
+
+	for {
+		count, err := bpf.UdpConnStateMap.BatchLookup(&cursor, keysOut, valuesOut, nil)
+		if count > 0 {
+			for i := 0; i < count; i++ {
+				stats.entries++
+				key := keysOut[i]
+				value := valuesOut[i]
+				// Check if this entry is a DNS connection (port 53)
+				isDNS := key.Sport == dnsPortNetworkOrder || key.Dport == dnsPortNetworkOrder
+
+				// Apply dynamic timeout based on map pressure
+				timeout := normalTimeoutNano
+				if isDNS {
+					timeout = dnsTimeoutNano
+				}
+				if aggressiveCleanup {
+					if isDNS {
+						timeout = aggressiveDnsTimeout
+					} else {
+						timeout = aggressiveTimeout
+					}
+				}
+
+				age := nowNano - int64(value.LastSeenNs)
+				if age > timeout {
+					keysToDelete = append(keysToDelete, key)
+				}
+			}
+		}
+		if err != nil {
+			if !strings.Contains(err.Error(), "bad file descriptor") &&
+				!strings.Contains(err.Error(), "file descriptor") &&
+				!strings.Contains(err.Error(), "closed") && !strings.Contains(err.Error(), "key does not exist") {
+				c.log.Errorf("cleanupUdpConnStateMap: BatchLookup error: %v", err)
+			}
+			break
+		}
+	}
+
+	maxEntries := bpf.UdpConnStateMap.MaxEntries()
+	if maxEntries > 0 {
+		stats.usagePercent = stats.entries * 100 / int(maxEntries)
+	}
+
+	// Batch delete from UDP conn state map
+	if len(keysToDelete) > 0 {
+		if _, err := BpfMapBatchDelete(bpf.UdpConnStateMap, keysToDelete); err != nil {
+			c.log.Debugf("cleanupUdpConnStateMap: batch delete error: %v", err)
+		}
+	}
+	stats.deleted = len(keysToDelete)
+
+	// Log cleanup stats
+	if len(keysToDelete) > 0 {
+		if aggressiveCleanup {
+			c.log.Debugf("cleanupUdpConnStateMap: aggressive cleanup removed %d entries (%d%% usage)",
+				len(keysToDelete), stats.usagePercent)
+		} else {
+			c.log.Debugf("cleanupUdpConnStateMap: removed %d expired entries", len(keysToDelete))
+		}
+	}
+
+	return stats
+}
+
+// cleanupTcpConnStateMap iterates through the TCP conn state map and removes
+// entries that haven't been seen within their timeout period or are in CLOSING state.
+// When map is under pressure, aggressive cleanup applies with shorter timeouts.
+func (c *ControlPlane) cleanupTcpConnStateMap(aggressiveCleanup bool) mapCleanupStats {
+	stats := mapCleanupStats{}
+
+	// Check if we're shutting down - if stop signal is sent, skip cleanup
+	select {
+	case <-c.connStateJanitorStop:
+		return stats
+	default:
+	}
+
+	bpf := c.currentBpf()
+	if bpf == nil || bpf.TcpConnStateMap == nil {
+		return stats
+	}
+
+	// Use CLOCK_MONOTONIC to match bpf_ktime_get_ns() time base.
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
+		c.log.Errorf("cleanupTcpConnStateMap: failed to get monotonic time: %v", err)
+		return stats
+	}
+	nowNano := ts.Nano()
+
+	establishedTimeoutNano := tcpConnStateTimeoutEstablished.Nanoseconds()
+	closingTimeoutNano := tcpConnStateTimeoutClosing.Nanoseconds()
+
+	scratch := c.connStateJanitorScratch()
+	keysToDelete := takeJanitorDeleteScratch(scratch.tcpDelete)
+	keysOut := ensureJanitorLookupScratch(scratch.tcpKeys)
+	valuesOut := ensureJanitorLookupScratch(scratch.tcpValues)
+	defer func() {
+		scratch.tcpDelete = keepJanitorDeleteScratch(keysToDelete)
+		scratch.tcpKeys = keysOut
+		scratch.tcpValues = valuesOut
+	}()
+
+	var cursor ebpf.MapBatchCursor
+	aggressiveEstablishedTimeout := establishedTimeoutNano / 2
+	aggressiveClosingTimeout := closingTimeoutNano / 2
+
+	for {
+		count, err := bpf.TcpConnStateMap.BatchLookup(&cursor, keysOut, valuesOut, nil)
+		if count > 0 {
+			for i := 0; i < count; i++ {
+				stats.entries++
+				key := keysOut[i]
+				value := valuesOut[i]
+				// Apply dynamic timeout based on map pressure
+				establishedTimeout := establishedTimeoutNano
+				closingTimeout := closingTimeoutNano
+				if aggressiveCleanup {
+					establishedTimeout = aggressiveEstablishedTimeout
+					closingTimeout = aggressiveClosingTimeout
+				}
+
+				// Check if entry should be cleaned up
+				shouldDelete := false
+				if value.State == 1 { // TCP_STATE_CLOSING
+					// CLOSING state: quick cleanup (FIN/RST seen)
+					age := nowNano - int64(value.LastSeenNs)
+					if age > closingTimeout {
+						shouldDelete = true
+					}
+				} else {
+					// ACTIVE state: normal timeout for established connections
+					age := nowNano - int64(value.LastSeenNs)
+					if age > establishedTimeout {
+						shouldDelete = true
+					}
+				}
+
+				if shouldDelete {
+					keysToDelete = append(keysToDelete, key)
+				}
+			}
+		}
+		if err != nil {
+			if !strings.Contains(err.Error(), "bad file descriptor") &&
+				!strings.Contains(err.Error(), "file descriptor") &&
+				!strings.Contains(err.Error(), "closed") && !strings.Contains(err.Error(), "key does not exist") {
+				c.log.Errorf("cleanupTcpConnStateMap: BatchLookup error: %v", err)
+			}
+			break
+		}
+	}
+
+	maxEntries := bpf.TcpConnStateMap.MaxEntries()
+	if maxEntries > 0 {
+		stats.usagePercent = stats.entries * 100 / int(maxEntries)
+	}
+
+	// Batch delete expired TCP conn state entries
+	if len(keysToDelete) > 0 {
+		if _, err := BpfMapBatchDelete(bpf.TcpConnStateMap, keysToDelete); err != nil {
+			c.log.Debugf("cleanupTcpConnStateMap: batch delete error: %v", err)
+		}
+	}
+	stats.deleted = len(keysToDelete)
+
+	// Log cleanup stats
+	if len(keysToDelete) > 0 {
+		if aggressiveCleanup {
+			c.log.Debugf("cleanupTcpConnStateMap: aggressive cleanup removed %d TCP entries (%d%% usage)",
+				len(keysToDelete), stats.usagePercent)
+		} else {
+			c.log.Debugf("cleanupTcpConnStateMap: removed %d expired TCP entries", len(keysToDelete))
+		}
+	}
+
+	return stats
+}
+
+func (c *ControlPlane) connStateJanitorScratch() *connStateJanitorScratch {
+	if c.connStateScratch == nil {
+		c.connStateScratch = &connStateJanitorScratch{}
+	}
+	return c.connStateScratch
+}
+
+// checkBpfMapHealth monitors map usage and overflow counters for robustness.
+// Alerts when maps are approaching capacity or experiencing high overflow rates.
+func (c *ControlPlane) checkBpfMapHealth() {
+	bpf := c.currentBpf()
+	if bpf == nil || bpf.BpfStatsMap == nil {
+		return
+	}
+
+	// Define alert thresholds
+	const (
+		warnThreshold = 70               // Alert at 70% capacity
+		critThreshold = 85               // Critical alert at 85% capacity
+		alertCooldown = 30 * time.Second // Minimum time between alerts
+	)
+
+	now := time.Now()
+
+	// Read and log overflow counters from BPF stats map
+	var (
+		udpOverflow uint64
+		tcpOverflow uint64
+	)
+
+	udpOverflow, tcpOverflow = c.readMapOverflowCounters(bpf.BpfStatsMap)
+
+	// Alert on significant overflow counts
+	if udpOverflow > 0 || tcpOverflow > 0 {
+		// Use atomic Int64 to store the last alert time in Unix nanoseconds.
+		// Cooldown prevents alert spam.
+		nowNano := now.UnixNano()
+		last := c.lastBpfOverflowAlertTime.Load()
+		if last == 0 || last+int64(alertCooldown) < nowNano {
+			if c.lastBpfOverflowAlertTime.CompareAndSwap(last, nowNano) {
+				c.log.Warnf("BPF map overflow detected: UDP conn state=%d, TCP conn state=%d. "+
+					"Some packets are falling back to slower paths. Check if map capacity is adequate.",
+					udpOverflow, tcpOverflow)
+			}
+		}
+	}
+
+	// Estimate map usage by sampling (full iteration is expensive)
+	if bpf.UdpConnStateMap != nil {
+		maxEntries := bpf.UdpConnStateMap.MaxEntries()
+		// If overflow is happening, map is under pressure.
+		if udpOverflow > 100 && maxEntries > 0 {
+			nowNano := now.UnixNano()
+			last := c.lastUdpPressureAlertTime.Load()
+			if last == 0 || last+int64(alertCooldown) < nowNano {
+				if c.lastUdpPressureAlertTime.CompareAndSwap(last, nowNano) {
+					c.log.Errorf("CRITICAL: UDP conn state map is under heavy pressure (overflow=%d). "+
+						"Configured capacity=%d. Consider increasing udp_conn_state_map capacity or reducing UDP connection timeout.",
+						udpOverflow, maxEntries)
+				}
+			}
+		}
+	}
+	if bpf.TcpConnStateMap != nil {
+		maxEntries := bpf.TcpConnStateMap.MaxEntries()
+		if tcpOverflow > 100 && maxEntries > 0 {
+			nowNano := now.UnixNano()
+			last := c.lastTcpPressureAlertTime.Load()
+			if last == 0 || last+int64(alertCooldown) < nowNano {
+				if c.lastTcpPressureAlertTime.CompareAndSwap(last, nowNano) {
+					c.log.Errorf("CRITICAL: TCP conn state map is under heavy pressure (overflow=%d). "+
+						"Configured capacity=%d. Consider increasing tcp_conn_state_map capacity or reducing TCP connection timeout.",
+						tcpOverflow, maxEntries)
+				}
+			}
+		}
+	}
+}
+
+func (c *ControlPlane) readMapOverflowCounters(m *ebpf.Map) (udpOverflow uint64, tcpOverflow uint64) {
+	if m == nil {
+		return 0, 0
+	}
+	if v, err := readBpfStatsCounter(m, 0); err == nil {
+		udpOverflow = v
+	}
+	if v, err := readBpfStatsCounter(m, 1); err == nil {
+		tcpOverflow = v
+	}
+	return udpOverflow, tcpOverflow
+}
+
+func (c *ControlPlane) allowDnsFastPathErrorLog(now time.Time) bool {
+	nowNano := now.UnixNano()
+	for {
+		last := c.lastDnsFastPathErrorLogTime.Load()
+		if nowNano-last < int64(dnsFastPathErrorLogInterval) {
+			return false
+		}
+		if c.lastDnsFastPathErrorLogTime.CompareAndSwap(last, nowNano) {
+			return true
+		}
+	}
+}
+
+func (c *ControlPlane) allowDnsFastPathServfailLog(now time.Time) bool {
+	nowNano := now.UnixNano()
+	for {
+		last := c.lastDnsFastPathServfailLogTime.Load()
+		if nowNano-last < int64(dnsFastPathErrorLogInterval) {
+			return false
+		}
+		if c.lastDnsFastPathServfailLogTime.CompareAndSwap(last, nowNano) {
+			return true
+		}
+	}
+}
+
+// readBpfStatsCounter reads a counter from the BPF stats map by key index.
+func readBpfStatsCounter(m *ebpf.Map, key uint32) (uint64, error) {
+	var value uint64
+	if err := m.Lookup(&key, &value); err != nil {
+		return 0, err
+	}
+	return value, nil
+}
+
 type Listener struct {
-	tcpListener net.Listener
-	packetConn  net.PacketConn
-	port        uint16
+	tcp4Listener net.Listener
+	tcp6Listener net.Listener
+	packetConn   net.PacketConn
+	port         uint16
+}
+
+const udpDualStackListenIP = "::"
+
+func udpDualStackListenAddr(port uint16) string {
+	return net.JoinHostPort(udpDualStackListenIP, strconv.Itoa(int(port)))
+}
+
+func enableUDPDualStackSocket(c syscall.RawConn) error {
+	var sockOptErr error
+	controlErr := c.Control(func(fd uintptr) {
+		if err := unix.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, unix.IPV6_V6ONLY, 0); err != nil {
+			sockOptErr = fmt.Errorf("error setting IPV6_V6ONLY socket option: %w", err)
+		}
+	})
+	if controlErr != nil {
+		return fmt.Errorf("error invoking socket control function: %w", controlErr)
+	}
+	return sockOptErr
+}
+
+func udpDualStackListenControl(c syscall.RawConn) error {
+	if err := dialer.TproxyControl(c); err != nil {
+		return err
+	}
+	return enableUDPDualStackSocket(c)
+}
+
+func udpIngressSupportsBatch(conn *net.UDPConn) bool {
+	if conn == nil {
+		return false
+	}
+	_, ok := conn.LocalAddr().(*net.UDPAddr)
+	return ok
+}
+
+func wakeTCPListener(listener net.Listener) {
+	tcpListener, ok := listener.(*net.TCPListener)
+	if !ok || tcpListener == nil {
+		return
+	}
+	_ = tcpListener.SetDeadline(time.Now())
+}
+
+func wakePacketConn(packetConn net.PacketConn) {
+	udpConn, ok := packetConn.(*net.UDPConn)
+	if !ok || udpConn == nil {
+		return
+	}
+	now := time.Now()
+	_ = udpConn.SetReadDeadline(now)
+	_ = udpConn.SetWriteDeadline(now)
 }
 
 func (l *Listener) Close() error {
-	var (
-		err  error
-		err2 error
-	)
-	if err, err2 = l.tcpListener.Close(), l.packetConn.Close(); err2 != nil {
-		if err == nil {
-			err = err2
-		} else {
-			err = fmt.Errorf("%w: %v", err, err2)
+	if l == nil {
+		return nil
+	}
+
+	var err error
+
+	if l.tcp4Listener != nil {
+		wakeTCPListener(l.tcp4Listener)
+		err = l.tcp4Listener.Close()
+	}
+	if l.tcp6Listener != nil {
+		wakeTCPListener(l.tcp6Listener)
+		if err2 := l.tcp6Listener.Close(); err2 != nil {
+			if err == nil {
+				err = err2
+			} else {
+				err = fmt.Errorf("%w: %v", err, err2)
+			}
+		}
+	}
+	if l.packetConn != nil {
+		wakePacketConn(l.packetConn)
+		if err2 := l.packetConn.Close(); err2 != nil {
+			if err == nil {
+				err = err2
+			} else {
+				err = fmt.Errorf("%w: %v", err, err2)
+			}
 		}
 	}
 	return err
+}
+
+// Clone duplicates the listener sockets so a new control plane generation can
+// take over serving before the old generation closes its copies. This allows
+// reload to wake the old Accept/Read goroutines without rebinding the port.
+func (l *Listener) Clone() (cloned *Listener, err error) {
+	if l == nil {
+		return nil, fmt.Errorf("nil listener")
+	}
+
+	cloned = &Listener{port: l.port}
+	defer func() {
+		if err != nil && cloned != nil {
+			_ = cloned.Close()
+		}
+	}()
+
+	if l.tcp4Listener != nil {
+		cloned.tcp4Listener, err = cloneTCPListener(l.tcp4Listener)
+		if err != nil {
+			return nil, fmt.Errorf("clone tcp4 listener: %w", err)
+		}
+	}
+	if l.tcp6Listener != nil {
+		cloned.tcp6Listener, err = cloneTCPListener(l.tcp6Listener)
+		if err != nil {
+			return nil, fmt.Errorf("clone tcp6 listener: %w", err)
+		}
+	}
+	if l.packetConn != nil {
+		cloned.packetConn, err = cloneUDPPacketConn(l.packetConn)
+		if err != nil {
+			return nil, fmt.Errorf("clone udp packet conn: %w", err)
+		}
+	}
+
+	return cloned, nil
+}
+
+func cloneTCPListener(listener net.Listener) (net.Listener, error) {
+	file, err := dupTCPListenerFile(listener)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+
+	cloned, err := net.FileListener(file)
+	if err != nil {
+		return nil, err
+	}
+	return cloned, nil
+}
+
+func cloneUDPPacketConn(packetConn net.PacketConn) (net.PacketConn, error) {
+	file, err := dupUDPPacketConnFile(packetConn)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+
+	cloned, err := net.FilePacketConn(file)
+	if err != nil {
+		return nil, err
+	}
+	return cloned, nil
+}
+
+func dupTCPListenerFile(listener net.Listener) (*os.File, error) {
+	tcpListener, ok := listener.(*net.TCPListener)
+	if !ok {
+		return nil, fmt.Errorf("unexpected tcp listener type %T", listener)
+	}
+	rawConn, err := tcpListener.SyscallConn()
+	if err != nil {
+		return nil, err
+	}
+	return dupRawConnFile(rawConn, "dae-tcp-listener")
+}
+
+func dupUDPPacketConnFile(packetConn net.PacketConn) (*os.File, error) {
+	udpConn, ok := packetConn.(*net.UDPConn)
+	if !ok {
+		return nil, fmt.Errorf("unexpected udp packet conn type %T", packetConn)
+	}
+	rawConn, err := udpConn.SyscallConn()
+	if err != nil {
+		return nil, err
+	}
+	return dupRawConnFile(rawConn, "dae-udp-packet-conn")
+}
+
+func dupRawConnFile(rawConn syscall.RawConn, name string) (*os.File, error) {
+	var dupFD int
+	var dupErr error
+	if err := rawConn.Control(func(fd uintptr) {
+		dupFD, dupErr = unix.Dup(int(fd))
+		if dupErr == nil {
+			unix.CloseOnExec(dupFD)
+		}
+	}); err != nil {
+		return nil, err
+	}
+	if dupErr != nil {
+		return nil, dupErr
+	}
+	return os.NewFile(uintptr(dupFD), name), nil
 }
 
 func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err error) {
 	sentReady := false
 	defer func() {
 		if !sentReady {
-			readyChan <- false
+			select {
+			case readyChan <- false:
+			default:
+			}
 		}
 	}()
 	udpConn := listener.packetConn.(*net.UDPConn)
 	/// Serve.
-	// TCP socket.
-	tcpFile, err := listener.tcpListener.(*net.TCPListener).File()
+	// TCP IPv4 socket.
+	tcp4File, err := dupTCPListenerFile(listener.tcp4Listener)
 	if err != nil {
-		return fmt.Errorf("failed to retrieve copy of the underlying TCP connection file")
+		return fmt.Errorf("failed to retrieve copy of the underlying TCP IPv4 listener file")
 	}
 	c.deferFuncs = append(c.deferFuncs, func() error {
-		return tcpFile.Close()
+		return tcp4File.Close()
 	})
-	if err := c.core.bpf.ListenSocketMap.Update(consts.ZeroKey, uint64(tcpFile.Fd()), ebpf.UpdateAny); err != nil {
+	if err := c.core.bpf.ListenSocketMap.Update(consts.ZeroKey, uint64(tcp4File.Fd()), ebpf.UpdateAny); err != nil {
+		return err
+	}
+	// TCP IPv6 socket.
+	tcp6File, err := dupTCPListenerFile(listener.tcp6Listener)
+	if err != nil {
+		return fmt.Errorf("failed to retrieve copy of the underlying TCP IPv6 listener file")
+	}
+	c.deferFuncs = append(c.deferFuncs, func() error {
+		return tcp6File.Close()
+	})
+	if err := c.core.bpf.ListenSocketMap.Update(consts.TwoKey, uint64(tcp6File.Fd()), ebpf.UpdateAny); err != nil {
 		return err
 	}
 	// UDP socket.
-	udpFile, err := udpConn.File()
+	udpFile, err := dupUDPPacketConnFile(listener.packetConn)
 	if err != nil {
 		return fmt.Errorf("failed to retrieve copy of the underlying UDP connection file")
 	}
@@ -776,79 +2473,322 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 	}
 
 	sentReady = true
-	readyChan <- true
-	go func() {
+	select {
+	case readyChan <- true:
+	default:
+	}
+	serveTCP := func(tcpListener net.Listener) {
 		for {
 			select {
 			case <-c.ctx.Done():
 				return
 			default:
 			}
-			lconn, err := listener.tcpListener.Accept()
+			lconn, err := tcpListener.Accept()
 			if err != nil {
-				if !strings.Contains(err.Error(), "use of closed network connection") {
+				if !commonerrors.IsClosedConnection(err) && !stderrors.Is(err, context.Canceled) {
 					c.log.Errorf("Error when accept: %v", err)
 				}
-				break
+				return
 			}
 			go func(lconn net.Conn) {
 				c.inConnections.Store(lconn, struct{}{})
 				defer c.inConnections.Delete(lconn)
-				if err := c.handleConn(lconn); err != nil {
+				// Keep the ControlPlane lifecycle context so shutdown/reload can cancel
+				// in-flight connection handling. Dial timeout is applied independently
+				// inside RouteDialTcp and is not reduced by sniffing time.
+				if err := c.handleConn(c.ctx, lconn); err != nil {
 					c.log.Warnln("handleConn:", err)
 				}
 			}(lconn)
 		}
-	}()
+	}
+	go serveTCP(listener.tcp4Listener)
+	go serveTCP(listener.tcp6Listener)
 	go func() {
-		buf := pool.GetFullCap(consts.EthernetMtu)
-		var oob [120]byte // Size for original dest
-		defer buf.Put()
+		processPacket := func(pktBuf pool.PB, src netip.AddrPort, oob []byte) {
+			pktDst := RetrieveOriginalDest(oob)
+			realDst := common.ConvergeAddrPort(pktDst)
+			// IMPORTANT: keep original capacity for pool bucketing.
+			// Do not use full-slice cap clipping ([:n:n]) here, otherwise Put()
+			// may return the buffer into a wrong size-class and poison the pool.
+			convergeSrc := common.ConvergeAddrPort(src)
+			flowDecision := ClassifyUdpFlow(convergeSrc, realDst, pktBuf)
+			if flowDecision.IsQuicInitial {
+				flowDecision = flowDecision.EnsureSnifferSession()
+			}
+			// Debug:
+			// t := time.Now()
+			task := func() {
+				data := pktBuf
+
+				defer data.Put()
+				var routingResult *bpfRoutingResult
+				var freshRoutingResult *bpfRoutingResult
+
+				// DNS ingress fast path: valid DNS packets to port 53 do not need
+				// UdpEndpoint state tracking on ingress. Keep userspace handling to
+				// reduce hot-path overhead, but best-effort preserve tuple metadata
+				// for rules matching (pname/mac/dscp).
+				if realDst.Port() == 53 {
+					// IMPORTANT: Check if this is destined for our own DNS listener.
+					// If so, skip fast path processing to avoid double-handling.
+					// Traffic to 127.0.0.1:53 (or our configured listen address) should be
+					// handled only by the DNS listener, not by UDP ingress fast path.
+					if c.dnsListener != nil {
+						listenAddr := c.dnsListener.Addr()
+						// Match both exact address and wildcard port 53 to our listener
+						if listenAddr != "" && listenAddr == realDst.String() {
+							// This is destined for our own DNS listener - let it handle normally
+							if c.log.IsLevelEnabled(logrus.TraceLevel) {
+								c.log.WithFields(logrus.Fields{
+									"src":        convergeSrc.String(),
+									"dst":        realDst.String(),
+									"listenAddr": listenAddr,
+								}).Trace("Skipping DNS fast path for traffic to our own DNS listener")
+							}
+							// Fall through to normal UDP processing (will be dropped/ignored)
+							return
+						}
+						// Also check for common local addresses
+						if realDst.Addr().IsLoopback() || realDst.Addr().IsUnspecified() {
+							// For local addresses, verify we have a DNS listener on port 53
+							if _, portStr, err := net.SplitHostPort(listenAddr); err == nil {
+								if port, err := strconv.Atoi(portStr); err == nil && port == 53 {
+									// We have a DNS listener on port 53, skip fast path
+									if c.log.IsLevelEnabled(logrus.TraceLevel) {
+										c.log.WithFields(logrus.Fields{
+											"src":        convergeSrc.String(),
+											"dst":        realDst.String(),
+											"listenAddr": listenAddr,
+										}).Trace("Skipping DNS fast path for local loopback DNS listener traffic")
+									}
+									return
+								}
+							}
+						}
+					}
+
+					if dnsMessage, _ := ChooseNatTimeout(data, true); dnsMessage != nil {
+						dnsRoutingResult := &bpfRoutingResult{
+							Outbound: uint8(consts.OutboundControlPlaneRouting),
+							Mark:     c.soMarkFromDae,
+						}
+						if rr, retrieveErr := c.core.RetrieveRoutingResult(convergeSrc, realDst, unix.IPPROTO_UDP); retrieveErr == nil {
+							dnsRoutingResult = rr
+							if dnsRoutingResult.Mark == 0 {
+								dnsRoutingResult.Mark = c.soMarkFromDae
+							}
+						} else if !stderrors.Is(retrieveErr, ebpf.ErrKeyNotExist) && c.log.IsLevelEnabled(logrus.DebugLevel) {
+							c.log.WithFields(logrus.Fields{
+								"src": convergeSrc.String(),
+								"dst": realDst.String(),
+							}).WithError(retrieveErr).Debug("UDP routing tuple lookup failed for DNS ingress fast path; fallback to minimal routing metadata")
+						}
+						req := &udpRequest{
+							realSrc:       convergeSrc,
+							realDst:       realDst,
+							src:           convergeSrc,
+							lConn:         udpConn,
+							routingResult: dnsRoutingResult,
+						}
+
+						if e := c.dnsController.Handle_(c.ctx, dnsMessage, req); e != nil {
+							if stderrors.Is(e, ErrDNSQueryConcurrencyLimitExceeded) {
+								if c.log.IsLevelEnabled(logrus.DebugLevel) {
+									c.log.WithFields(logrus.Fields{
+										"src": convergeSrc.String(),
+										"dst": realDst.String(),
+									}).Debug("DNS query concurrency limit exceeded in fast path")
+								}
+								return
+							}
+							if c.log.IsLevelEnabled(logrus.WarnLevel) && c.allowDnsFastPathErrorLog(time.Now()) {
+								c.log.WithFields(logrus.Fields{
+									"src":      convergeSrc.String(),
+									"dst":      realDst.String(),
+									"question": dnsMessage.Question,
+									"error":    e.Error(),
+								}).Warn("DNS ingress fast path failed; sending SERVFAIL response")
+							}
+							if sendErr := c.dnsController.sendDnsErrorResponse_(dnsMessage, dnsmessage.RcodeServerFailure, "ServeFail (dns ingress fast path)", req, nil); sendErr != nil {
+								if c.log.IsLevelEnabled(logrus.WarnLevel) && c.allowDnsFastPathServfailLog(time.Now()) {
+									c.log.WithError(stderrors.Join(e, sendErr)).WithFields(logrus.Fields{
+										"src": convergeSrc.String(),
+										"dst": realDst.String(),
+									}).Warn("Failed to send SERVFAIL response in DNS fast path")
+								}
+								return
+							}
+						} else if c.log.IsLevelEnabled(logrus.TraceLevel) {
+							// Success logging for DNS fast path (trace level only)
+							c.log.WithFields(logrus.Fields{
+								"src":      convergeSrc.String(),
+								"dst":      realDst.String(),
+								"question": dnsMessage.Question,
+							}).Trace("DNS ingress fast path handled successfully")
+						}
+						return
+					}
+				}
+
+				if !c.udpRouteScopeSensitive {
+					if ue, ok := DefaultUdpEndpointPool.Get(flowDecision.CachedRoutingEndpointKey()); ok {
+						if cached, cacheHit := ue.GetCachedRoutingResult(realDst, unix.IPPROTO_UDP); cacheHit {
+							routingResult = cached
+						}
+					}
+					if routingResult == nil {
+						if fallbackKey, ok := flowDecision.CachedRoutingFallbackKey(); ok {
+							if ue, ok := DefaultUdpEndpointPool.Get(fallbackKey); ok {
+								if cached, cacheHit := ue.GetCachedRoutingResult(realDst, unix.IPPROTO_UDP); cacheHit {
+									routingResult = cached
+								}
+							}
+						}
+					}
+				}
+
+				if routingResult == nil {
+					rr, retrieveErr := c.core.RetrieveRoutingResult(convergeSrc, realDst, unix.IPPROTO_UDP)
+					if retrieveErr != nil {
+						switch {
+						case stderrors.Is(retrieveErr, ebpf.ErrKeyNotExist):
+							// Keep behavior consistent with TCP path: missing tuple can happen
+							// in short race windows; fallback to userspace routing instead of
+							// dropping the packet.
+							routingResult = &bpfRoutingResult{
+								Outbound: uint8(consts.OutboundControlPlaneRouting),
+							}
+							if c.log.IsLevelEnabled(logrus.DebugLevel) {
+								c.log.WithFields(logrus.Fields{
+									"src": convergeSrc.String(),
+									"dst": realDst.String(),
+								}).WithError(retrieveErr).Debug("UDP routing tuple missing; fallback to userspace routing")
+							}
+						case realDst.Port() == 53:
+							// DNS should never be silently dropped due to transient eBPF lookup
+							// failures. Fall back to userspace routing to preserve availability.
+							routingResult = &bpfRoutingResult{
+								Outbound: uint8(consts.OutboundControlPlaneRouting),
+							}
+							c.log.WithFields(logrus.Fields{
+								"src": convergeSrc.String(),
+								"dst": realDst.String(),
+							}).WithError(retrieveErr).Warn("UDP routing tuple lookup failed for DNS; fallback to userspace routing")
+						default:
+							c.log.Warnf("No AddrPort presented: %v", retrieveErr)
+							return
+						}
+					} else {
+						routingResult = rr
+						rrCopy := *routingResult
+						freshRoutingResult = &rrCopy
+					}
+				}
+
+				if e := c.handlePkt(udpConn, data, convergeSrc, realDst, routingResult, flowDecision, false); e != nil {
+					c.log.Warnln("handlePkt:", e)
+					return
+				}
+
+				if !c.udpRouteScopeSensitive && freshRoutingResult != nil {
+					updatedCache := false
+					if ue, ok := DefaultUdpEndpointPool.Get(flowDecision.CachedRoutingEndpointKey()); ok {
+						ue.UpdateCachedRoutingResult(realDst, unix.IPPROTO_UDP, freshRoutingResult)
+						updatedCache = true
+					}
+					if !updatedCache {
+						if fallbackKey, ok := flowDecision.CachedRoutingFallbackKey(); ok {
+							if ue, ok := DefaultUdpEndpointPool.Get(fallbackKey); ok {
+								ue.UpdateCachedRoutingResult(realDst, unix.IPPROTO_UDP, freshRoutingResult)
+							}
+						}
+					}
+				}
+			}
+
+			// Session FIFO now takes precedence for generic UDP forwarding.
+			// Ordered ingress keeps same-flow packets in the order they were read
+			// from the client socket before they reach handlePkt/ue.WriteTo.
+			// Direct goroutine dispatch remains only for narrow low-latency
+			// exceptions where queue handoff is less valuable than minimal overhead
+			// (DNS, SIP/RTP, STUN).
+			switch flowDecision.DispatchStrategy() {
+			case StrategyOrderedIngress:
+				DefaultUdpTaskPool.EmitTask(flowDecision.Key, task)
+			case StrategyDirectGoroutine:
+				// DNS, VoIP, and other low-latency exception traffic bypasses the
+				// ordered per-flow queue and runs immediately.
+				go task()
+			default:
+				// Defensive fallback for unknown future strategy values.
+				if !c.udpUnorderedRunner.Submit(flowDecision.Key, task) {
+					pktBuf.Put()
+				}
+			}
+			// if d := time.Since(t); d > 100*time.Millisecond {
+			// 	logrus.Println(d)
+			// }
+		}
+
+		if udpIngressSupportsBatch(udpConn) {
+			batchReader := newUDPIngressBatchReader(udpConn, 0)
+			if batchReader == nil {
+				goto singleRead
+			}
+			defer batchReader.Close()
+
+			for {
+				select {
+				case <-c.ctx.Done():
+					return
+				default:
+				}
+
+				// IPv4 listener fast path: batch read reduces syscall overhead while
+				// preserving one exclusive ingress buffer per packet.
+				n, err := batchReader.ReadBatch()
+				if err != nil {
+					if !commonerrors.IsClosedConnection(err) {
+						c.log.Errorf("ReadBatchUDP: %v", err)
+					}
+					break
+				}
+				for i := 0; i < n; i++ {
+					pktBuf, src, oob, ok := batchReader.Take(i)
+					if !ok {
+						continue
+					}
+					processPacket(pktBuf, src, oob)
+				}
+			}
+			return
+		}
+
+	singleRead:
+		var oob [udpIngressOobSize]byte
 		for {
 			select {
 			case <-c.ctx.Done():
 				return
 			default:
 			}
-			n, oobn, _, src, err := udpConn.ReadMsgUDPAddrPort(buf, oob[:])
+
+			pktBuf := pool.GetFullCap(consts.EthernetMtu)
+			n, oobn, _, src, err := udpConn.ReadMsgUDPAddrPort(pktBuf, oob[:])
 			if err != nil {
-				if !strings.Contains(err.Error(), "use of closed network connection") {
-					c.log.Errorf("ReadFromUDPAddrPort: %v, %v", src.String(), err)
+				pktBuf.Put()
+				if !commonerrors.IsClosedConnection(err) {
+					c.log.Errorf("ReadMsgUDPAddrPort: %v", err)
 				}
 				break
 			}
-			newBuf := pool.Get(n)
-			copy(newBuf, buf[:n])
-			newOob := pool.Get(oobn)
-			copy(newOob, oob[:oobn])
-			newSrc := src
-			convergeSrc := common.ConvergeAddrPort(src)
-			// Debug:
-			// t := time.Now()
-			DefaultUdpTaskPool.EmitTask(convergeSrc.String(), func() {
-				data := newBuf
-				oob := newOob
-				src := newSrc
 
-				defer data.Put()
-				defer oob.Put()
-				var realDst netip.AddrPort
-				var routingResult *bpfRoutingResult
-				pktDst := RetrieveOriginalDest(oob)
-				routingResult, err := c.core.RetrieveRoutingResult(src, pktDst, unix.IPPROTO_UDP)
-				if err != nil {
-					c.log.Warnf("No AddrPort presented: %v", err)
-					return
-				} else {
-					realDst = pktDst
-				}
-				if e := c.handlePkt(udpConn, data, convergeSrc, common.ConvergeAddrPort(pktDst), common.ConvergeAddrPort(realDst), routingResult, false); e != nil {
-					c.log.Warnln("handlePkt:", e)
-				}
-			})
-			// if d := time.Since(t); d > 100*time.Millisecond {
-			// 	logrus.Println(d)
-			// }
+			// Dual-stack UDP listener path: prefer correctness and IPv6 coverage
+			// over batch-read optimization. OOB is consumed synchronously in
+			// processPacket, so reusing the stack buffer is safe here.
+			processPacket(pktBuf[:n], src, oob[:oobn])
 		}
 	}()
 	c.ActivateCheck()
@@ -856,27 +2796,46 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 	return nil
 }
 
-func (c *ControlPlane) ListenAndServe(readyChan chan<- bool, port uint16) (listener *Listener, err error) {
+// Listen opens the ingress listeners without starting the serving loops.
+func (c *ControlPlane) Listen(port uint16) (listener *Listener, err error) {
 	// Listen.
-	listenConfig := net.ListenConfig{
+	tcpListenConfig := net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			return dialer.TproxyControl(c)
 		},
 	}
-	listenAddr := net.JoinHostPort(c.listenIp, strconv.Itoa(int(port)))
-	tcpListener, err := listenConfig.Listen(context.TODO(), "tcp", listenAddr)
-	if err != nil {
-		return nil, fmt.Errorf("listenTCP: %w", err)
+	udpListenConfig := net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			return udpDualStackListenControl(c)
+		},
 	}
-	packetConn, err := listenConfig.ListenPacket(context.TODO(), "udp", listenAddr)
+	tcp4ListenAddr := net.JoinHostPort(c.listenIp, strconv.Itoa(int(port)))
+	tcp4Listener, err := tcpListenConfig.Listen(context.Background(), "tcp4", tcp4ListenAddr)
 	if err != nil {
-		_ = tcpListener.Close()
-		return nil, fmt.Errorf("listenUDP: %w", err)
+		return nil, fmt.Errorf("listenTCP4: %w", err)
+	}
+	tcp6Listener, err := tcpListenConfig.Listen(context.Background(), "tcp6", net.JoinHostPort("::", strconv.Itoa(int(port))))
+	if err != nil {
+		_ = tcp4Listener.Close()
+		return nil, fmt.Errorf("listenTCP6: %w", err)
+	}
+	packetConn, err := udpListenConfig.ListenPacket(context.Background(), "udp6", udpDualStackListenAddr(port))
+	if err != nil {
+		if c.log != nil {
+			c.log.WithError(err).Warn("Failed to open dual-stack UDP listener; fallback to IPv4-only UDP listener")
+		}
+		packetConn, err = tcpListenConfig.ListenPacket(context.Background(), "udp", tcp4ListenAddr)
+		if err != nil {
+			_ = tcp4Listener.Close()
+			_ = tcp6Listener.Close()
+			return nil, fmt.Errorf("listenUDP: %w", err)
+		}
 	}
 	listener = &Listener{
-		tcpListener: tcpListener,
-		packetConn:  packetConn,
-		port:        port,
+		tcp4Listener: tcp4Listener,
+		tcp6Listener: tcp6Listener,
+		packetConn:   packetConn,
+		port:         port,
 	}
 	defer func() {
 		if err != nil {
@@ -884,7 +2843,15 @@ func (c *ControlPlane) ListenAndServe(readyChan chan<- bool, port uint16) (liste
 		}
 	}()
 
-	// Serve
+	return listener, nil
+}
+
+func (c *ControlPlane) ListenAndServe(readyChan chan<- bool, port uint16) (listener *Listener, err error) {
+	listener, err = c.Listen(port)
+	if err != nil {
+		return nil, err
+	}
+
 	if err = c.Serve(readyChan, listener); err != nil {
 		return nil, fmt.Errorf("failed to serve: %w", err)
 	}
@@ -893,9 +2860,16 @@ func (c *ControlPlane) ListenAndServe(readyChan chan<- bool, port uint16) (liste
 }
 
 func (c *ControlPlane) chooseBestDnsDialer(
-	req *udpRequest,
-	dnsUpstream *dns.Upstream,
+	ctx context.Context, req *udpRequest, dnsUpstream *dns.Upstream,
 ) (*dialArgument, error) {
+	now := time.Now()
+	snapshotKey, snapshotEnabled := buildDnsDialerSnapshotKey(req, dnsUpstream)
+	if snapshotEnabled {
+		if cachedDialArg, hit := c.loadDnsDialerSnapshot(snapshotKey, now); hit {
+			return cachedDialArg, nil
+		}
+	}
+
 	/// Choose the best l4proto+ipversion dialer, and change taregt DNS to the best ipversion DNS upstream for DNS request.
 	// Get available ipversions and l4protos for DNS upstream.
 	ipversions, l4protos := dnsUpstream.SupportedNetworks()
@@ -910,7 +2884,8 @@ func (c *ControlPlane) chooseBestDnsDialer(
 	)
 	// Get the min latency path.
 	networkType := dialer.NetworkType{
-		IsDns: true,
+		IsDns:           true,
+		UdpHealthDomain: dialer.UdpHealthDomainDns,
 	}
 	for _, ver := range ipversions {
 		for _, proto := range l4protos {
@@ -941,12 +2916,24 @@ func (c *ControlPlane) chooseBestDnsDialer(
 			if err != nil {
 				continue
 			}
-			//if c.log.IsLevelEnabled(logrus.TraceLevel) {
-			//	c.log.WithFields(logrus.Fields{
-			//		"name":     d.Name(),
-			//		"latency":  latency,
-			//		"network":  networkType.String(),
-			//		"outbound": dialerGroup.Name,
+			candidate := &dialArgument{
+				l4proto:      proto,
+				ipversion:    ver,
+				bestDialer:   d,
+				bestOutbound: dialerGroup,
+				bestTarget:   netip.AddrPortFrom(dAddr, dnsUpstream.Port),
+				mark:         mark,
+				mptcp:        c.mptcp,
+			}
+			if c.isDnsDialArgPenalized(candidate, now) {
+				continue
+			}
+			// if c.log.IsLevelEnabled(logrus.TraceLevel) {
+			// 	c.log.WithFields(logrus.Fields{
+			// 		"name":     d.Name(),
+			// 		"latency":  latency,
+			// 		"network":  networkType.String(),
+			// 		"outbound": dialerGroup.Name,
 			//	}).Traceln("Choice")
 			//}
 			if bestDialer == nil || latency < bestLatency {
@@ -983,7 +2970,7 @@ func (c *ControlPlane) chooseBestDnsDialer(
 			"dialer":     bestDialer.Property().Name,
 		}).Traceln("Choose DNS path")
 	}
-	return &dialArgument{
+	selected := &dialArgument{
 		l4proto:      l4proto,
 		ipversion:    ipversion,
 		bestDialer:   bestDialer,
@@ -991,34 +2978,133 @@ func (c *ControlPlane) chooseBestDnsDialer(
 		bestTarget:   bestTarget,
 		mark:         dialMark,
 		mptcp:        c.mptcp,
-	}, nil
+	}
+	if snapshotEnabled {
+		c.storeDnsDialerSnapshot(snapshotKey, selected, now)
+	}
+	return selected, nil
 }
 
 func (c *ControlPlane) AbortConnections() (err error) {
+	if c == nil {
+		return nil
+	}
+
 	var errs []error
 	c.inConnections.Range(func(key, value any) bool {
-		if err = key.(net.Conn).Close(); err != nil {
-			errs = append(errs, err)
+		// Use comma-ok pattern for type safety to prevent panic if key is not net.Conn
+		conn, ok := key.(net.Conn)
+		if !ok {
+			// Unexpected type in inConnections - this should never happen
+			errs = append(errs, fmt.Errorf("unexpected type %T in inConnections", key))
+			return true
+		}
+		if cerr := conn.Close(); cerr != nil {
+			errs = append(errs, cerr)
 		}
 		return true
 	})
-	return errors.Join(errs...)
+	return stderrors.Join(errs...)
+}
+
+// DetachBpfHooks immediately detaches all BPF hooks from the system.
+// This should be called first when receiving SIGTERM to ensure network is restored
+// even if the rest of the shutdown process takes too long and gets SIGKILL'd.
+// This is safe to call multiple times - subsequent calls will be no-ops.
+func (c *ControlPlane) DetachBpfHooks() error {
+	if c == nil || c.core == nil {
+		return nil
+	}
+	return c.core.DetachBpfHooks()
+}
+
+func resetGlobalUdpState() {
+	DefaultUdpEndpointPool.Reset()
+	DefaultAnyfromPool.Reset()
+	DefaultUdpTaskPool.Reset()
+	DefaultPacketSnifferSessionMgr.Reset()
+	ResetUdpLogLimiters()
+}
+
+func (c *ControlPlane) closeTail() error {
+	// Collect errors from defer funcs using errors.Join (Go 1.26 best practice)
+	var errs []error
+	for i := len(c.deferFuncs) - 1; i >= 0; i-- {
+		if e := c.deferFuncs[i](); e != nil {
+			errs = append(errs, e)
+		}
+	}
+
+	// Clear sync.Maps to prevent memory leak on reload.
+	// These maps accumulate data over time and must be explicitly cleared.
+	c.realDomainNegSet.Range(func(key, value any) bool {
+		c.realDomainNegSet.Delete(key)
+		return true
+	})
+	c.dnsDialerSnapshot.Range(func(key, value any) bool {
+		c.dnsDialerSnapshot.Delete(key)
+		return true
+	})
+	c.dnsDialerPenalty.Range(func(key, value any) bool {
+		c.dnsDialerPenalty.Delete(key)
+		return true
+	})
+	c.clearAllTcpSniffNegative()
+	c.failedQuicDcidCache.Clear()
+	// Note: inConnections is cleared by AbortConnections() which should be called before Close()
+
+	// Combine defer errors with core.Close error
+	if c.core != nil {
+		if coreErr := c.core.Close(); coreErr != nil {
+			errs = append(errs, coreErr)
+		}
+	}
+	return stderrors.Join(errs...)
 }
 
 func (c *ControlPlane) Close() (err error) {
-	// Invoke defer funcs in reverse order.
-	for i := len(c.deferFuncs) - 1; i >= 0; i-- {
-		if e := c.deferFuncs[i](); e != nil {
-			// Combine errors.
-			if err != nil {
-				err = fmt.Errorf("%w; %v", err, e)
-			} else {
-				err = e
-			}
-		}
+	if c == nil {
+		return nil
 	}
-	c.cancel()
-	return c.core.Close()
+
+	if c.cancel != nil {
+		c.cancel()
+	}
+
+	var stopWg sync.WaitGroup
+	stopWg.Add(2)
+	go func() {
+		defer stopWg.Done()
+		c.stopRealDomainNegJanitor()
+	}()
+	go func() {
+		defer stopWg.Done()
+		c.stopConnStateJanitor()
+	}()
+	stopWg.Wait()
+
+	// Shutdown must retire global UDP resources eagerly so stop/reload does not
+	// leave old sockets alive until background timeouts eventually reclaim them.
+	resetGlobalUdpState()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- c.closeTail()
+	}()
+
+	timer := time.NewTimer(controlPlaneDeferredCleanupTimeout)
+	defer timer.Stop()
+
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		timeoutErr := fmt.Errorf("control plane close tail timed out after %v", controlPlaneDeferredCleanupTimeout)
+		if c.log != nil {
+			c.log.WithError(timeoutErr).Warn("ControlPlane.Close: continuing while tail cleanup finishes in background")
+		}
+		return timeoutErr
+	}
 }
 
 // StopDNSListener stops the DNS listener if it's running

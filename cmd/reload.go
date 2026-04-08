@@ -32,13 +32,56 @@ func readSignalProgressFile() (code byte, content string, err error) {
 	return code, content, nil
 }
 
+type signalProgressSnapshot struct {
+	exists  bool
+	content []byte
+}
+
+func snapshotSignalProgressFile(path string) (signalProgressSnapshot, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return signalProgressSnapshot{}, nil
+		}
+		return signalProgressSnapshot{}, err
+	}
+	return signalProgressSnapshot{exists: true, content: append([]byte(nil), b...)}, nil
+}
+
+func restoreSignalProgressFile(path string, snapshot signalProgressSnapshot) error {
+	if !snapshot.exists {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	return os.WriteFile(path, snapshot.content, 0644)
+}
+
+func writeReloadSendAndSignal(path string, pid int, kill func(int, syscall.Signal) error) error {
+	snapshot, err := snapshotSignalProgressFile(path)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, []byte{consts.ReloadSend}, 0644); err != nil {
+		return err
+	}
+	if err := kill(pid, syscall.SIGUSR1); err != nil {
+		if restoreErr := restoreSignalProgressFile(path, snapshot); restoreErr != nil {
+			return fmt.Errorf("send reload signal: %w (restore progress file: %v)", err, restoreErr)
+		}
+		return err
+	}
+	return nil
+}
+
 var (
 	abort     bool
 	reloadCmd = &cobra.Command{
 		Use:   "reload [pid]",
 		Short: "To reload config file without interrupt connections.",
 		Run: func(cmd *cobra.Command, args []string) {
-            internal.AutoSu()
+			internal.AutoSu()
 			if len(args) == 0 {
 				_pid, err := os.ReadFile(PidFilePath)
 				if err != nil {
@@ -49,12 +92,12 @@ var (
 			}
 			pid, err := strconv.Atoi(args[0])
 			if err != nil {
-				cmd.Help()
+				_ = cmd.Help()
 				os.Exit(1)
 			}
 			if abort {
 				if f, err := os.Create(AbortFile); err == nil {
-					f.Close()
+					_ = f.Close()
 				}
 			}
 			// Read the first line of SignalProgressFilePath.
@@ -64,11 +107,9 @@ var (
 				fmt.Printf("%v shows another reload operation is in progress.\n", SignalProgressFilePath)
 				return
 			}
-			// Set the progress as ReloadSend.
-			os.WriteFile(SignalProgressFilePath, []byte{consts.ReloadSend}, 0644)
-			// Send signal.
-			if err = syscall.Kill(pid, syscall.SIGUSR1); err != nil {
-				fmt.Println(err)
+			// Set the progress as ReloadSend and roll it back if signaling fails.
+			if err = writeReloadSendAndSignal(SignalProgressFilePath, pid, syscall.Kill); err != nil {
+				fmt.Printf("failed to request reload: %v\n", err)
 				os.Exit(1)
 			}
 			time.Sleep(500 * time.Millisecond)
