@@ -10,7 +10,6 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
-	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
