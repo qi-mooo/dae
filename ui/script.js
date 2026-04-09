@@ -659,6 +659,8 @@ const refs = {
   logsList: document.getElementById("logsList"),
 };
 
+let state;
+
 function createSocketRecord() {
   return {
     socket: null,
@@ -740,7 +742,7 @@ function defaultLogLevelNoteMessage() {
   return msg("shell.runtimeLogNote", "PATCH /configs updates the runtime log level and keeps the page state in sync.");
 }
 
-const state = {
+state = {
   controllerUrl: "",
   token: "",
   currentView: "dashboard",
@@ -833,7 +835,7 @@ function normalizeLocale(locale) {
 }
 
 function t(key, fallback = "", vars = {}) {
-  const locale = normalizeLocale(state.locale);
+  const locale = normalizeLocale(state?.locale || "zh-CN");
   const dictionary = I18N[locale] || I18N["zh-CN"];
   const template = dictionary[key] || I18N["zh-CN"][key] || fallback || key;
   return template.replace(/\{(\w+)\}/g, (_, token) => String(vars[token] ?? ""));
@@ -1180,13 +1182,17 @@ function isEmbeddedUIPath() {
   return window.location.pathname === "/ui" || window.location.pathname === "/ui/" || window.location.pathname.startsWith("/ui/");
 }
 
+function embeddedControllerOrigin() {
+  return isEmbeddedUIPath() ? window.location.origin : "";
+}
+
 function locationHashParams() {
   const raw = window.location.hash.replace(/^#\/?/, "").replace(/^\?/, "");
   return new URLSearchParams(raw);
 }
 
 function syncControllerInputs() {
-  refs.controllerUrl.value = state.controllerUrl;
+  refs.controllerUrl.value = state.controllerUrl || embeddedControllerOrigin();
   refs.controllerToken.value = state.token;
 }
 
@@ -1196,8 +1202,7 @@ function loadPersistedConnection() {
   const urlFromQuery = query.get("controller");
   const tokenFromQuery = query.get("token");
   const tokenFromHash = hash.get("token");
-  const servedByEmbeddedUI = isEmbeddedUIPath();
-  const sameOriginController = servedByEmbeddedUI ? window.location.origin : "";
+  const sameOriginController = embeddedControllerOrigin();
 
   state.controllerUrl = urlFromQuery || sameOriginController || window.localStorage.getItem(STORAGE_KEYS.controller) || "";
   state.token = tokenFromQuery || tokenFromHash || window.localStorage.getItem(STORAGE_KEYS.token) || "";
@@ -1227,6 +1232,21 @@ function loadUiPrefs() {
 function persistConnection() {
   window.localStorage.setItem(STORAGE_KEYS.controller, state.controllerUrl);
   window.localStorage.setItem(STORAGE_KEYS.token, state.token);
+}
+
+function resolveControllerInputValue() {
+  const currentInput = refs.controllerUrl.value.trim();
+  if (currentInput) {
+    return currentInput;
+  }
+  if (state.controllerUrl) {
+    return state.controllerUrl;
+  }
+  const embeddedOrigin = embeddedControllerOrigin();
+  if (embeddedOrigin) {
+    return embeddedOrigin;
+  }
+  return "";
 }
 
 function persistUiPrefs() {
@@ -3152,6 +3172,7 @@ function renderControllerPanel() {
   refs.applyLogLevelButton.disabled = !state.controllerUrl || state.logLevelChanging || state.connecting;
   refs.controllerTopToggle.textContent = connected ? t("shell.controllerButton", "Controller") : t("shell.login", "Login");
   refs.controllerTopToggle.hidden = !connected;
+  syncControllerInputs();
 
   renderLayoutState();
 }
@@ -4177,7 +4198,7 @@ function handleConnectionError(error) {
 
 async function connectController() {
   try {
-    state.controllerUrl = normalizeControllerUrl(refs.controllerUrl.value);
+    state.controllerUrl = normalizeControllerUrl(resolveControllerInputValue());
     state.token = refs.controllerToken.value.trim();
   } catch (error) {
     setApiStatus("warn", error.message);
