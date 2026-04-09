@@ -1,8 +1,4 @@
 const DEFAULT_CONFIG_PLACEHOLDER = "# Connect controller to load /etc/dae/config.dae";
-const DEFAULT_CONTROLLER_HINT =
-  "登录后开始同步 Dashboard、Traffic、Proxies、Logs 和 Config。";
-const DEFAULT_EDITOR_NOTE = "按 section 折叠编辑 config.dae；常见块走 GUI Builder，复杂语法可切到 Raw。";
-const DEFAULT_LOG_LEVEL_NOTE = "通过 PATCH /configs 更新运行时日志级别，并保持页面状态同步。";
 const SAMPLE_SIZE = 20;
 const TRAFFIC_SAMPLE_INTERVAL_MS = 5000;
 const CONNECTION_LIMIT = 200;
@@ -78,29 +74,29 @@ const GLOBAL_FIELD_DEFS = [
 
 const VIEW_META = {
   dashboard: {
-    eyebrow: "Dashboard",
-    title: "daed Dashboard",
-    banner: "Overview",
+    eyebrow: "view.dashboard.eyebrow",
+    title: "view.dashboard.title",
+    banner: "view.dashboard.banner",
   },
   proxies: {
-    eyebrow: "Proxies",
-    title: "Proxy Runtime",
-    banner: "Proxy Groups",
+    eyebrow: "view.proxies.eyebrow",
+    title: "view.proxies.title",
+    banner: "view.proxies.banner",
   },
   traffic: {
-    eyebrow: "Traffic",
-    title: "Realtime Traffic",
-    banner: "Traffic Flow",
+    eyebrow: "view.traffic.eyebrow",
+    title: "view.traffic.title",
+    banner: "view.traffic.banner",
   },
   configs: {
-    eyebrow: "Config",
-    title: "Startup Config",
-    banner: "config.dae Builder",
+    eyebrow: "view.configs.eyebrow",
+    title: "view.configs.title",
+    banner: "view.configs.banner",
   },
   logs: {
-    eyebrow: "Logs",
-    title: "Live Logs",
-    banner: "Structured Log Stream",
+    eyebrow: "view.logs.eyebrow",
+    title: "view.logs.title",
+    banner: "view.logs.banner",
   },
 };
 
@@ -109,17 +105,472 @@ const STORAGE_KEYS = {
   token: "daed-demo-token",
   sidebarCollapsed: "daed-demo-sidebar-collapsed",
   connectionSort: "daed-demo-connection-sort",
+  locale: "daed-demo-locale",
 };
 
 const CONFIG_SECTION_DESCRIPTIONS = {
-  include: "拆分配置入口和 include 路径。",
-  global: "全局运行参数、控制器、网络接口和拨号行为。",
-  subscription: "订阅链接和订阅标签。",
-  node: "手工添加的节点链接。",
-  dns: "DNS 上游、绑定地址与 DNS routing。",
-  group: "代理组、选路策略和组内筛选。",
-  routing: "流量分流与 fallback 规则。",
-  document: "无法拆分时按整份文档编辑。",
+  include: "config.section.include.summary",
+  global: "config.section.global.summary",
+  subscription: "config.section.subscription.summary",
+  node: "config.section.node.summary",
+  dns: "config.section.dns.summary",
+  group: "config.section.group.summary",
+  routing: "config.section.routing.summary",
+  document: "config.section.document.summary",
+};
+
+const SUPPORTED_LOCALES = ["zh-CN", "en"];
+const I18N = {
+  "zh-CN": {
+    "app.title": "daed UI Demo",
+    "view.dashboard.eyebrow": "Dashboard",
+    "view.dashboard.title": "daed Dashboard",
+    "view.dashboard.banner": "Overview",
+    "view.proxies.eyebrow": "Proxies",
+    "view.proxies.title": "Proxy Runtime",
+    "view.proxies.banner": "Proxy Groups",
+    "view.traffic.eyebrow": "Traffic",
+    "view.traffic.title": "Realtime Traffic",
+    "view.traffic.banner": "Traffic Flow",
+    "view.configs.eyebrow": "Config",
+    "view.configs.title": "Startup Config",
+    "view.configs.banner": "config.dae Builder",
+    "view.logs.eyebrow": "Logs",
+    "view.logs.title": "Live Logs",
+    "view.logs.banner": "Structured Log Stream",
+    "nav.workspace": "Workspace",
+    "nav.dashboard": "Dashboard",
+    "nav.proxies": "Proxies",
+    "nav.traffic": "Traffic",
+    "nav.configs": "Config",
+    "nav.logs": "Logs",
+    "shell.controller": "Controller",
+    "shell.connections": "Connections",
+    "shell.status": "Status",
+    "shell.up": "Up",
+    "shell.down": "Down",
+    "shell.login": "登录",
+    "shell.language": "语言",
+    "shell.externalController": "External Controller",
+    "shell.externalControllerTitle": "连接 dae External Controller",
+    "shell.externalControllerMeta": "输入地址与 token，连接 dae 控制器。",
+    "shell.target": "Target",
+    "shell.controllerHint": "连接到 dae 的外部控制器后，Dashboard、Traffic、Proxies、Logs 和 config.dae 才会开始实时更新。",
+    "shell.controllerAddress": "Controller",
+    "shell.bearerToken": "Bearer Token",
+    "shell.runtimeLogLevel": "Runtime Log Level",
+    "shell.apply": "Apply",
+    "shell.runtimeLogNote": "通过 PATCH /configs 更新运行时日志级别，并保持页面状态同步。",
+    "shell.connected.withToken": "已连接，使用 Bearer token。",
+    "shell.connected.noToken": "已连接，未配置 token。",
+    "shell.embedded.summary": "当前页面已经运行在 dae 控制器上，只需要输入 token。",
+    "shell.disconnected.summary": "输入地址与 token，连接 dae 控制器。",
+    "shell.connected.title": "Controller 已连接",
+    "shell.embedded.title": "登录 dae 控制台",
+    "shell.connect.title": "连接 dae External Controller",
+    "shell.embedded.hint": "正在访问当前控制器。输入 token 后直接建立连接。",
+    "shell.connecting": "登录中...",
+    "shell.reconnect": "重新连接",
+    "shell.controllerButton": "Controller",
+    "common.pause": "暂停",
+    "common.resume": "恢复",
+    "common.clear": "清空",
+    "common.notSet": "未设置",
+    "common.noGroup": "暂无分组",
+    "common.none": "无",
+    "common.unlinked": "未连接",
+    "common.selector": "selector",
+    "common.secondsAgo": "{value} 秒前",
+    "common.minutesAgo": "{value} 分钟前",
+    "status.connected": "已连接",
+    "status.disconnected": "未连接",
+    "status.unauthorized": "未授权",
+    "status.unavailable": "不可用",
+    "status.connecting": "连接中",
+    "shell.hint.connected": "已连接，实时数据正在同步。",
+    "shell.hint.unauthorized": "登录失败，请确认 token 正确。",
+    "shell.hint.unavailable": "无法连接 controller，请确认 dae 正在运行。",
+    "shell.hint.connecting": "正在连接 controller 并建立实时通道。",
+    "shell.logLevel.unsupported": "不支持的日志级别：{level}",
+    "shell.logLevel.updated": "运行时日志级别已更新为 {level}。",
+    "shell.logLevel.failed": "更新运行时日志级别失败：{error}",
+    "config.header.title": "config.dae Builder",
+    "config.header.note": "按 section 折叠编辑，常见块走 GUI Builder，复杂语法随时切回 Raw。",
+    "config.loadedFile": "Loaded File",
+    "config.sections": "Sections",
+    "config.current": "Current",
+    "config.addSection": "Add Section",
+    "config.builder": "Builder",
+    "config.raw": "Raw",
+    "config.deleteSection": "Delete Section",
+    "config.advanced": "检测到未结构化内容，保存时会保留；切到 Raw 可以直接编辑这些内容。",
+    "config.wholeDocument": "Whole Document",
+    "config.badge.entry": "Entry",
+    "config.badge.missing": "Missing",
+    "config.additionalOptions.title": "Additional Options",
+    "config.additionalOptions.note": "不在上面表单里的 global 键值，直接以 key: value 追加。",
+    "config.entries.title": "Entries",
+    "config.list.empty": "暂无条目。",
+    "config.extra.empty": "暂无额外选项。",
+    "config.option.add": "Add Option",
+    "config.include.add": "Add Include",
+    "config.block.add": "Add Block",
+    "config.group.add": "Add Group",
+    "config.rule.add": "Add Rule",
+    "config.remove": "Remove",
+    "config.dns.options.title": "Top-level Options",
+    "config.dns.options.note": "DNS 顶层的简单键值项。",
+    "config.dns.blocks.title": "Nested Blocks",
+    "config.dns.blocks.note": "GUI 里直接新增 upstream、routing 等块。",
+    "config.dns.options.empty": "暂无顶层项。",
+    "config.dns.blocks.empty": "暂无嵌套块。",
+    "config.group.title": "Groups",
+    "config.group.note": "每个 group 单独一个卡片，方便新增和整理策略块。",
+    "config.group.empty": "暂无 group。",
+    "config.routing.title": "Routing Rules",
+    "config.routing.note": "按顺序添加规则，右侧删除，最后单独维护 fallback。",
+    "config.routing.empty": "暂无路由规则。",
+    "config.fallback": "Fallback",
+    "config.empty.sections": "暂无可编辑 section。",
+    "config.section.include.summary": "拆分配置入口和 include 路径。",
+    "config.section.global.summary": "全局运行参数、控制器、网络接口和拨号行为。",
+    "config.section.subscription.summary": "订阅链接和订阅标签。",
+    "config.section.node.summary": "手工添加的节点链接。",
+    "config.section.dns.summary": "DNS 上游、绑定地址与 DNS routing。",
+    "config.section.group.summary": "代理组、选路策略和组内筛选。",
+    "config.section.routing.summary": "流量分流与 fallback 规则。",
+    "config.section.document.summary": "无法拆分时按整份文档编辑。",
+    "config.action.saveReload": "保存并重载",
+    "config.action.reloadFile": "重新读取文件",
+    "config.message.removed": "已移除 {section} section，保存后生效。",
+    "config.message.reloaded": "已从磁盘重新加载 {path}。",
+    "config.message.reloadFailed": "重新加载 config.dae 失败：{error}",
+    "config.message.savedReloaded": "已保存 {path}，并已重新加载 dae。",
+    "config.message.savedWaiting": "已保存 {path}，等待 dae 重载...",
+    "config.message.saveFailed": "保存 config.dae 失败：{error}",
+    "config.message.writtenReloadFailed": "配置已写入，但 dae 未正常恢复：{error}",
+    "config.message.exists": "{section} section 已存在。",
+    "config.message.added": "已在 {path} 中新增 {section} section。",
+    "config.count.options": "{value} 个选项",
+    "config.count.items": "{value} 项",
+    "config.count.blocks": "{options} 个选项 · {blocks} 个块",
+    "config.count.groups": "{value} 个组",
+    "config.count.rules": "{value} 条规则",
+    "config.count.raw": "原始 section",
+    "config.count.empty": "空",
+    "config.dns.block.title": "嵌套块",
+    "config.dns.block.note": "例如 <code>upstream</code>、<code>routing</code> 这样的 dns 子块。",
+    "config.group.block.title": "代理组",
+    "config.group.block.note": "在这里添加分组名，并填写 policy、filter 等规则。",
+    "dashboard.runtimeKicker": "实时运行态",
+    "dashboard.runtimeTitle": "运行概览",
+    "dashboard.version": "版本",
+    "dashboard.systemStatus": "系统状态",
+    "dashboard.live": "实时",
+    "dashboard.mode": "模式",
+    "dashboard.logLevel": "日志级别",
+    "dashboard.memory": "内存",
+    "dashboard.aliveNodes": "存活节点",
+    "dashboard.uploadTotal": "上传总量",
+    "dashboard.downloadTotal": "下载总量",
+    "dashboard.trafficFlow": "流量走势",
+    "dashboard.upload": "上传",
+    "dashboard.download": "下载",
+    "dashboard.connections": "连接",
+    "dashboard.openProxies": "打开 Proxies",
+    "proxies.title": "Proxies",
+    "proxies.resetGroup": "重置分组",
+    "proxies.reloadStream": "重连流",
+    "proxies.currentGroup": "当前分组",
+    "proxies.empty.groups": "/proxies 没有返回任何代理组。",
+    "proxies.empty.group": "连接可用 controller 后加载组和节点数据。",
+    "proxies.groupMeta": "{type} · 当前：{current} · {count} 个节点 · 右上角按钮可测延迟",
+    "proxies.groupMeta.compact": "{type} · 当前：{current} · {count} 个节点",
+    "proxies.groupMeta.pending": "连接控制器后加载代理组与节点。",
+    "proxies.address.unavailable": "地址不可用",
+    "proxies.delay.pending": "检测中",
+    "proxies.status.alive": "在线",
+    "proxies.status.down": "离线",
+    "proxies.node.selected": "已选择",
+    "proxies.node.use": "使用节点",
+    "proxies.probe.aria": "刷新延迟",
+    "proxies.latency.result": "{name} 延迟探测结果：{delay} ms，来自 /proxies/{name}/delay。",
+    "proxies.latency.failed": "{name} 延迟探测失败：{error}",
+    "proxies.switch.result": "已通过 /proxies/{group} 将 {group} 切换到 {name}。",
+    "proxies.switch.failed": "切换 {group} 到 {name} 失败：{error}",
+    "proxies.reset.result": "已通过 DELETE /proxies/{group} 将 {group} 重置为默认策略。",
+    "proxies.reset.failed": "重置 {group} 失败：{error}",
+    "traffic.title": "Traffic Flow",
+    "traffic.uploadTotal": "上传总量",
+    "traffic.downloadTotal": "下载总量",
+    "traffic.activeConnections": "活动连接",
+    "traffic.sort": "排序",
+    "traffic.sort.downloadSpeed": "下载速度",
+    "traffic.sort.uploadSpeed": "上传速度",
+    "traffic.sort.downloadTotal": "下载总量",
+    "traffic.sort.uploadTotal": "上传总量",
+    "traffic.sort.updated": "最后活跃",
+    "traffic.sort.process": "进程",
+    "traffic.total": "总数",
+    "traffic.tcp": "TCP",
+    "traffic.udp": "UDP",
+    "connections.empty": "暂无活动连接。",
+    "connections.unavailable": "当前 controller 未提供 /connections。",
+    "connections.updated": "最近更新 {time}",
+    "connections.waiting": "等待 /connections 数据。",
+    "connections.from": "来源",
+    "connections.to": "去向",
+    "connections.download": "下载",
+    "connections.upload": "上传",
+    "connections.source": "源地址",
+    "connections.destination": "目标地址",
+    "connections.routing": "路由",
+    "connections.policy": "策略",
+    "connections.outbound": "出站 {name}",
+    "connections.seen": "时间 {time}",
+    "connections.markDscp": "Mark {mark} · DSCP {dscp}",
+    "connections.mac": "MAC {value}",
+    "connections.id": "ID {value}",
+    "connections.pid": "PID {value}",
+    "connections.pidUnknown": "PID -",
+    "connections.routing.attached": "已附加路由",
+    "connections.routing.missing": "无路由信息",
+    "connections.policy.must": "强制路由",
+    "connections.policy.normal": "普通路由",
+    "logs.title": "日志",
+    "logs.streamLevel": "日志级别",
+    "logs.empty": "暂无日志事件。",
+    "logs.status.waiting": "等待来自 /logs?format=structured&level={level} 的实时事件。",
+    "logs.status.offline": "连接 controller 后开启日志流。",
+    "logs.status.paused": "本地已暂停日志流，恢复后继续接收新事件。",
+    "logs.status.live": "正在以 {level} 级别实时接收日志。",
+    "logs.status.retrying": "正在重连 /logs 日志流，级别 {level}。",
+  },
+  en: {
+    "app.title": "daed UI Demo",
+    "view.dashboard.eyebrow": "Dashboard",
+    "view.dashboard.title": "daed Dashboard",
+    "view.dashboard.banner": "Overview",
+    "view.proxies.eyebrow": "Proxies",
+    "view.proxies.title": "Proxy Runtime",
+    "view.proxies.banner": "Proxy Groups",
+    "view.traffic.eyebrow": "Traffic",
+    "view.traffic.title": "Realtime Traffic",
+    "view.traffic.banner": "Traffic Flow",
+    "view.configs.eyebrow": "Config",
+    "view.configs.title": "Startup Config",
+    "view.configs.banner": "config.dae Builder",
+    "view.logs.eyebrow": "Logs",
+    "view.logs.title": "Live Logs",
+    "view.logs.banner": "Structured Log Stream",
+    "nav.workspace": "Workspace",
+    "nav.dashboard": "Dashboard",
+    "nav.proxies": "Proxies",
+    "nav.traffic": "Traffic",
+    "nav.configs": "Config",
+    "nav.logs": "Logs",
+    "shell.controller": "Controller",
+    "shell.connections": "Connections",
+    "shell.status": "Status",
+    "shell.up": "Up",
+    "shell.down": "Down",
+    "shell.login": "Login",
+    "shell.language": "Language",
+    "shell.externalController": "External Controller",
+    "shell.externalControllerTitle": "Connect to dae External Controller",
+    "shell.externalControllerMeta": "Enter the controller address and token to connect to dae.",
+    "shell.target": "Target",
+    "shell.controllerHint": "After connecting to dae external controller, Dashboard, Traffic, Proxies, Logs, and config.dae will start syncing live.",
+    "shell.controllerAddress": "Controller",
+    "shell.bearerToken": "Bearer Token",
+    "shell.runtimeLogLevel": "Runtime Log Level",
+    "shell.apply": "Apply",
+    "shell.runtimeLogNote": "PATCH /configs updates the runtime log level and keeps the page state in sync.",
+    "shell.connected.withToken": "Connected with Bearer token.",
+    "shell.connected.noToken": "Connected without token.",
+    "shell.embedded.summary": "This page is already served by dae. Only the token is required.",
+    "shell.disconnected.summary": "Enter the controller address and token to connect to dae.",
+    "shell.connected.title": "Controller Connected",
+    "shell.embedded.title": "Sign in to dae Console",
+    "shell.connect.title": "Connect to dae External Controller",
+    "shell.embedded.hint": "You are already on the current controller. Enter the token to connect directly.",
+    "shell.connecting": "Signing in...",
+    "shell.reconnect": "Reconnect",
+    "shell.controllerButton": "Controller",
+    "common.pause": "Pause",
+    "common.resume": "Resume",
+    "common.clear": "Clear",
+    "common.notSet": "Not set",
+    "common.noGroup": "No group",
+    "common.none": "None",
+    "common.unlinked": "Unlinked",
+    "common.selector": "selector",
+    "common.secondsAgo": "{value}s ago",
+    "common.minutesAgo": "{value}m ago",
+    "status.connected": "Connected",
+    "status.disconnected": "Disconnected",
+    "status.unauthorized": "Unauthorized",
+    "status.unavailable": "Unavailable",
+    "status.connecting": "Connecting",
+    "shell.hint.connected": "Connected. Live data is syncing now.",
+    "shell.hint.unauthorized": "Sign-in failed. Confirm the token is correct.",
+    "shell.hint.unavailable": "Unable to reach the controller. Confirm dae is running.",
+    "shell.hint.connecting": "Connecting to the controller and opening live channels.",
+    "shell.logLevel.unsupported": "Unsupported log level: {level}",
+    "shell.logLevel.updated": "Runtime log level updated to {level}.",
+    "shell.logLevel.failed": "Failed to update runtime log level: {error}",
+    "config.header.title": "config.dae Builder",
+    "config.header.note": "Edit by section accordion. Common blocks use the GUI builder, and complex syntax can switch back to Raw at any time.",
+    "config.loadedFile": "Loaded File",
+    "config.sections": "Sections",
+    "config.current": "Current",
+    "config.addSection": "Add Section",
+    "config.builder": "Builder",
+    "config.raw": "Raw",
+    "config.deleteSection": "Delete Section",
+    "config.advanced": "Unstructured content was detected. It will be preserved on save; switch to Raw to edit it directly.",
+    "config.wholeDocument": "Whole Document",
+    "config.badge.entry": "Entry",
+    "config.badge.missing": "Missing",
+    "config.additionalOptions.title": "Additional Options",
+    "config.additionalOptions.note": "Append global key/value pairs that are not covered by the form above as key: value lines.",
+    "config.entries.title": "Entries",
+    "config.list.empty": "No entries yet.",
+    "config.extra.empty": "No extra options yet.",
+    "config.option.add": "Add Option",
+    "config.include.add": "Add Include",
+    "config.block.add": "Add Block",
+    "config.group.add": "Add Group",
+    "config.rule.add": "Add Rule",
+    "config.remove": "Remove",
+    "config.dns.options.title": "Top-level Options",
+    "config.dns.options.note": "Simple key/value items at the top level of dns.",
+    "config.dns.blocks.title": "Nested Blocks",
+    "config.dns.blocks.note": "Add upstream, routing, and other nested blocks directly from the GUI.",
+    "config.dns.options.empty": "No top-level options yet.",
+    "config.dns.blocks.empty": "No nested blocks yet.",
+    "config.group.title": "Groups",
+    "config.group.note": "Each proxy group gets its own card for easier editing and organization.",
+    "config.group.empty": "No groups yet.",
+    "config.routing.title": "Routing Rules",
+    "config.routing.note": "Add rules in order, remove on the right, and maintain fallback separately.",
+    "config.routing.empty": "No routing rules yet.",
+    "config.fallback": "Fallback",
+    "config.empty.sections": "No editable sections yet.",
+    "config.section.include.summary": "Split the main entry from included child config paths.",
+    "config.section.global.summary": "Global runtime options, controller, interfaces, and dialing behavior.",
+    "config.section.subscription.summary": "Subscription links and subscription tags.",
+    "config.section.node.summary": "Manually added node links.",
+    "config.section.dns.summary": "DNS upstreams, bind address, and DNS routing.",
+    "config.section.group.summary": "Proxy groups, selection policy, and group filtering.",
+    "config.section.routing.summary": "Traffic routing rules and fallback behavior.",
+    "config.section.document.summary": "Edit the whole file as raw text when it cannot be split into sections.",
+    "config.action.saveReload": "Save + Reload",
+    "config.action.reloadFile": "Reload File",
+    "config.message.removed": "Removed {section}. Save to apply.",
+    "config.message.reloaded": "Reloaded {path} from disk.",
+    "config.message.reloadFailed": "Failed to reload config.dae: {error}",
+    "config.message.savedReloaded": "Saved {path} and reloaded dae.",
+    "config.message.savedWaiting": "Saved {path}. Waiting for dae to reload...",
+    "config.message.saveFailed": "Failed to save config.dae: {error}",
+    "config.message.writtenReloadFailed": "Config was written, but dae did not come back cleanly: {error}",
+    "config.message.exists": "{section} already exists.",
+    "config.message.added": "Added {section} in {path}.",
+    "config.count.options": "{value} options",
+    "config.count.items": "{value} items",
+    "config.count.blocks": "{options} options · {blocks} blocks",
+    "config.count.groups": "{value} groups",
+    "config.count.rules": "{value} rules",
+    "config.count.raw": "Raw section",
+    "config.count.empty": "Empty",
+    "config.dns.block.title": "Nested Block",
+    "config.dns.block.note": "dns child blocks such as <code>upstream</code> or <code>routing</code>.",
+    "config.group.block.title": "Proxy Group",
+    "config.group.block.note": "Add the group name here and fill in policy, filter, and related rules.",
+    "dashboard.runtimeKicker": "Live Runtime",
+    "dashboard.runtimeTitle": "Runtime at a glance",
+    "dashboard.version": "Version",
+    "dashboard.systemStatus": "System Status",
+    "dashboard.live": "LIVE",
+    "dashboard.mode": "Mode",
+    "dashboard.logLevel": "Log Level",
+    "dashboard.memory": "Memory",
+    "dashboard.aliveNodes": "Alive Nodes",
+    "dashboard.uploadTotal": "Upload Total",
+    "dashboard.downloadTotal": "Download Total",
+    "dashboard.trafficFlow": "Traffic Flow",
+    "dashboard.upload": "Upload",
+    "dashboard.download": "Download",
+    "dashboard.connections": "Connections",
+    "dashboard.openProxies": "Open Proxies",
+    "proxies.title": "Proxies",
+    "proxies.resetGroup": "Reset Group",
+    "proxies.reloadStream": "Reload Stream",
+    "proxies.currentGroup": "Current Group",
+    "proxies.empty.groups": "No proxy groups were returned by /proxies.",
+    "proxies.empty.group": "Connect to an available controller to load groups and nodes.",
+    "proxies.groupMeta": "{type} · current: {current} · {count} node(s) · use the top-right button to probe latency",
+    "proxies.groupMeta.compact": "{type} · current: {current} · {count} node(s)",
+    "proxies.groupMeta.pending": "Connect the controller to load proxy groups and nodes.",
+    "proxies.address.unavailable": "address unavailable",
+    "proxies.delay.pending": "pending",
+    "proxies.status.alive": "alive",
+    "proxies.status.down": "down",
+    "proxies.node.selected": "Selected",
+    "proxies.node.use": "Use Node",
+    "proxies.probe.aria": "refresh delay",
+    "proxies.latency.result": "Latency probe for {name} returned {delay} ms from /proxies/{name}/delay.",
+    "proxies.latency.failed": "Latency probe failed for {name}: {error}",
+    "proxies.switch.result": "Switched {group} to {name} through /proxies/{group}.",
+    "proxies.switch.failed": "Failed to switch {group} to {name}: {error}",
+    "proxies.reset.result": "Reset {group} to its default policy through DELETE /proxies/{group}.",
+    "proxies.reset.failed": "Failed to reset {group}: {error}",
+    "traffic.title": "Traffic Flow",
+    "traffic.uploadTotal": "Upload Total",
+    "traffic.downloadTotal": "Download Total",
+    "traffic.activeConnections": "Active Connections",
+    "traffic.sort": "Sort",
+    "traffic.sort.downloadSpeed": "Down Speed",
+    "traffic.sort.uploadSpeed": "Up Speed",
+    "traffic.sort.downloadTotal": "Down Total",
+    "traffic.sort.uploadTotal": "Up Total",
+    "traffic.sort.updated": "Last Seen",
+    "traffic.sort.process": "Process",
+    "traffic.total": "Total",
+    "traffic.tcp": "TCP",
+    "traffic.udp": "UDP",
+    "connections.empty": "No active connections.",
+    "connections.unavailable": "The current controller does not provide /connections.",
+    "connections.updated": "Updated {time}",
+    "connections.waiting": "Waiting for /connections data.",
+    "connections.from": "From",
+    "connections.to": "To",
+    "connections.download": "Download",
+    "connections.upload": "Upload",
+    "connections.source": "Source",
+    "connections.destination": "Destination",
+    "connections.routing": "Routing",
+    "connections.policy": "Policy",
+    "connections.outbound": "Outbound {name}",
+    "connections.seen": "Seen {time}",
+    "connections.markDscp": "Mark {mark} · DSCP {dscp}",
+    "connections.mac": "MAC {value}",
+    "connections.id": "ID {value}",
+    "connections.pid": "PID {value}",
+    "connections.pidUnknown": "PID -",
+    "connections.routing.attached": "Routing attached",
+    "connections.routing.missing": "Routing missing",
+    "connections.policy.must": "Must route",
+    "connections.policy.normal": "Normal route",
+    "logs.title": "Logs",
+    "logs.streamLevel": "Stream Level",
+    "logs.empty": "No log events yet.",
+    "logs.status.waiting": "Waiting for live events from /logs?format=structured&level={level}.",
+    "logs.status.offline": "Connect the controller to start the log stream.",
+    "logs.status.paused": "The local log stream is paused. Resume to keep receiving new events.",
+    "logs.status.live": "Streaming live logs at level {level}.",
+    "logs.status.retrying": "Reconnecting the /logs stream at level {level}.",
+  },
 };
 
 const refs = {
@@ -136,6 +587,7 @@ const refs = {
   pageEyebrow: document.getElementById("pageEyebrow"),
   pageTitle: document.getElementById("pageTitle"),
   pageBanner: document.getElementById("pageBanner"),
+  localeSelect: document.getElementById("localeSelect"),
   versionLabel: document.getElementById("versionLabel"),
   navItems: Array.from(document.querySelectorAll(".nav-item[data-view]")),
   viewButtons: Array.from(document.querySelectorAll("[data-open-view]")),
@@ -234,8 +686,58 @@ function createEmptyConnectionsSnapshot() {
   };
 }
 
-function createFallbackSections(content) {
-  return [buildConfigSection(content, 0, "document")];
+function createConfigDocumentMeta(document = {}, index = 0) {
+  const path = typeof document?.path === "string" ? document.path : "";
+  const relativePath =
+    typeof document?.relativePath === "string" && document.relativePath
+      ? document.relativePath
+      : path
+        ? path.split("/").pop() || path
+        : index === 0
+          ? "config.dae"
+          : `include-${index + 1}.dae`;
+  return {
+    documentKey: path || `document-${index}`,
+    path,
+    relativePath,
+    entry: Boolean(document?.entry || index === 0),
+    missing: Boolean(document?.missing),
+    content: typeof document?.content === "string" ? document.content : "",
+  };
+}
+
+function createFallbackConfigDocuments(content) {
+  return [
+    createConfigDocumentMeta(
+      {
+        path: "",
+        relativePath: "config.dae",
+        content,
+        entry: true,
+        missing: false,
+      },
+      0,
+    ),
+  ];
+}
+
+function msg(key, fallback = "", vars = {}) {
+  return { key, fallback, vars };
+}
+
+function defaultControllerHintMessage() {
+  return msg("shell.controllerHint", "After connecting to dae external controller, Dashboard, Traffic, Proxies, Logs, and config.dae will start syncing live.");
+}
+
+function defaultEditorNoteMessage() {
+  return msg(
+    "config.header.note",
+    "Edit by section accordion. Common blocks use the GUI builder, and complex syntax can switch back to Raw at any time.",
+  );
+}
+
+function defaultLogLevelNoteMessage() {
+  return msg("shell.runtimeLogNote", "PATCH /configs updates the runtime log level and keeps the page state in sync.");
 }
 
 const state = {
@@ -244,11 +746,11 @@ const state = {
   currentView: "dashboard",
   apiStatus: {
     kind: "offline",
-    message: "Disconnected",
+    message: msg("status.disconnected", "Disconnected"),
   },
-  controllerHintText: DEFAULT_CONTROLLER_HINT,
-  editorNoteText: DEFAULT_EDITOR_NOTE,
-  runtimeLogLevelNoteText: DEFAULT_LOG_LEVEL_NOTE,
+  controllerHintText: defaultControllerHintMessage(),
+  editorNoteText: defaultEditorNoteMessage(),
+  runtimeLogLevelNoteText: defaultLogLevelNoteMessage(),
   version: null,
   versionSignature: "",
   config: null,
@@ -270,11 +772,12 @@ const state = {
   selectedGroup: "",
   proxySignature: "",
   daeConfigPath: "",
+  daeConfigDocuments: createFallbackConfigDocuments(DEFAULT_CONFIG_PLACEHOLDER),
   daeConfigOriginal: DEFAULT_CONFIG_PLACEHOLDER,
   daeConfigContent: DEFAULT_CONFIG_PLACEHOLDER,
   daeConfigSignature: "",
-  daeConfigSections: createFallbackSections(DEFAULT_CONFIG_PLACEHOLDER),
-  daeConfigSelected: "document-0",
+  daeConfigSections: flattenDaeConfigSections(createFallbackConfigDocuments(DEFAULT_CONFIG_PLACEHOLDER)),
+  daeConfigSelected: "document-0::document-0",
   daeConfigDirty: false,
   logs: [],
   logsPaused: false,
@@ -282,6 +785,7 @@ const state = {
   refreshing: false,
   connecting: false,
   logLevelChanging: false,
+  locale: "zh-CN",
   sidebarCollapsed: false,
   connectionSort: "download-speed",
   controllerExpanded: true,
@@ -318,6 +822,55 @@ function stableJson(value) {
   return JSON.stringify(value);
 }
 
+function normalizeLocale(locale) {
+  if (!locale) {
+    return "zh-CN";
+  }
+  if (SUPPORTED_LOCALES.includes(locale)) {
+    return locale;
+  }
+  return String(locale).toLowerCase().startsWith("zh") ? "zh-CN" : "en";
+}
+
+function t(key, fallback = "", vars = {}) {
+  const locale = normalizeLocale(state.locale);
+  const dictionary = I18N[locale] || I18N["zh-CN"];
+  const template = dictionary[key] || I18N["zh-CN"][key] || fallback || key;
+  return template.replace(/\{(\w+)\}/g, (_, token) => String(vars[token] ?? ""));
+}
+
+function resolveText(value, fallback = "") {
+  if (value && typeof value === "object" && typeof value.key === "string") {
+    return t(value.key, value.fallback || fallback, value.vars || {});
+  }
+  if (typeof value === "string" && value) {
+    return value;
+  }
+  return fallback;
+}
+
+function isMessageKey(value, key) {
+  return Boolean(value && typeof value === "object" && value.key === key);
+}
+
+function applyStaticI18n() {
+  document.documentElement.lang = normalizeLocale(state.locale);
+  document.title = t("app.title", "daed UI Demo");
+
+  document.querySelectorAll("[data-i18n]").forEach((node) => {
+    node.textContent = t(node.dataset.i18n, node.textContent);
+  });
+  document.querySelectorAll("[data-i18n-placeholder]").forEach((node) => {
+    node.setAttribute("placeholder", t(node.dataset.i18nPlaceholder, node.getAttribute("placeholder") || ""));
+  });
+  document.querySelectorAll("[data-i18n-title]").forEach((node) => {
+    node.setAttribute("title", t(node.dataset.i18nTitle, node.getAttribute("title") || ""));
+  });
+  document.querySelectorAll("[data-i18n-aria-label]").forEach((node) => {
+    node.setAttribute("aria-label", t(node.dataset.i18nAriaLabel, node.getAttribute("aria-label") || ""));
+  });
+}
+
 function versionSnapshotSignature(payload) {
   return stableJson({
     meta: Boolean(payload?.meta),
@@ -330,10 +883,25 @@ function configSnapshotSignature(payload) {
 }
 
 function daeConfigDocumentSignature(doc) {
-  return stableJson({
-    path: doc?.path || "",
-    content: doc?.content || "",
-  });
+  const documents =
+    Array.isArray(doc?.documents) && doc.documents.length
+      ? doc.documents.map((document) => ({
+          path: document?.path || "",
+          relativePath: document?.relativePath || "",
+          content: document?.content || "",
+          entry: Boolean(document?.entry),
+          missing: Boolean(document?.missing),
+        }))
+      : [
+          {
+            path: doc?.path || "",
+            relativePath: "",
+            content: doc?.content || "",
+            entry: true,
+            missing: false,
+          },
+        ];
+  return stableJson(documents);
 }
 
 function connectionsSnapshotSignature(payload, available = true) {
@@ -466,7 +1034,7 @@ function formatClock(value) {
   if (Number.isNaN(time.getTime())) {
     return "-";
   }
-  return time.toLocaleTimeString("zh-CN", {
+  return time.toLocaleTimeString(normalizeLocale(state.locale), {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
@@ -484,10 +1052,10 @@ function formatTimeAgo(value) {
     return "-";
   }
   if (diffSeconds < 60) {
-    return `${diffSeconds}s ago`;
+    return t("common.secondsAgo", "{value}s ago", { value: diffSeconds });
   }
   if (diffSeconds < 3600) {
-    return `${Math.floor(diffSeconds / 60)}m ago`;
+    return t("common.minutesAgo", "{value}m ago", { value: Math.floor(diffSeconds / 60) });
   }
   return formatClock(value);
 }
@@ -549,7 +1117,7 @@ function sortTrafficConnections(connections) {
     } else if (sortMode === "updated") {
       result = parseTimestamp(right.lastSeen) - parseTimestamp(left.lastSeen);
     } else if (sortMode === "process") {
-      result = String(left.process || "").localeCompare(String(right.process || ""), "zh-CN");
+      result = String(left.process || "").localeCompare(String(right.process || ""), normalizeLocale(state.locale));
     } else {
       result = (right.downloadSpeed || 0) - (left.downloadSpeed || 0);
     }
@@ -563,7 +1131,7 @@ function sortTrafficConnections(connections) {
       return bySeen;
     }
 
-    return String(left.id || "").localeCompare(String(right.id || ""), "zh-CN");
+    return String(left.id || "").localeCompare(String(right.id || ""), normalizeLocale(state.locale));
   });
   return ordered;
 }
@@ -594,17 +1162,18 @@ function resetLiveState() {
   state.selectedGroup = "";
   state.proxySignature = "";
   state.daeConfigPath = "";
+  state.daeConfigDocuments = createFallbackConfigDocuments(DEFAULT_CONFIG_PLACEHOLDER);
   state.daeConfigOriginal = DEFAULT_CONFIG_PLACEHOLDER;
   state.daeConfigContent = DEFAULT_CONFIG_PLACEHOLDER;
   state.daeConfigSignature = "";
-  state.daeConfigSections = createFallbackSections(DEFAULT_CONFIG_PLACEHOLDER);
+  state.daeConfigSections = flattenDaeConfigSections(state.daeConfigDocuments);
   state.daeConfigSelected = state.daeConfigSections[0].id;
   state.daeConfigDirty = false;
   state.logs = [];
   state.logsPaused = false;
-  state.controllerHintText = DEFAULT_CONTROLLER_HINT;
-  state.editorNoteText = DEFAULT_EDITOR_NOTE;
-  state.runtimeLogLevelNoteText = DEFAULT_LOG_LEVEL_NOTE;
+  state.controllerHintText = defaultControllerHintMessage();
+  state.editorNoteText = defaultEditorNoteMessage();
+  state.runtimeLogLevelNoteText = defaultLogLevelNoteMessage();
 }
 
 function isEmbeddedUIPath() {
@@ -652,6 +1221,7 @@ function applyLocationCredentialsAndReconnect() {
 function loadUiPrefs() {
   state.sidebarCollapsed = window.localStorage.getItem(STORAGE_KEYS.sidebarCollapsed) === "true";
   state.connectionSort = window.localStorage.getItem(STORAGE_KEYS.connectionSort) || "download-speed";
+  state.locale = normalizeLocale(window.localStorage.getItem(STORAGE_KEYS.locale) || navigator.language || "zh-CN");
 }
 
 function persistConnection() {
@@ -662,6 +1232,7 @@ function persistConnection() {
 function persistUiPrefs() {
   window.localStorage.setItem(STORAGE_KEYS.sidebarCollapsed, String(state.sidebarCollapsed));
   window.localStorage.setItem(STORAGE_KEYS.connectionSort, state.connectionSort);
+  window.localStorage.setItem(STORAGE_KEYS.locale, state.locale);
 }
 
 function normalizeControllerUrl(value) {
@@ -1211,7 +1782,8 @@ function applyProxySnapshot(rawProxies) {
 }
 
 function applyDaeConfigDocument(doc) {
-  state.daeConfigPath = doc?.path || "";
+  const documents = normalizeDaeConfigDocuments(doc);
+  state.daeConfigPath = doc?.path || documents[0]?.path || "";
   const signature = daeConfigDocumentSignature(doc);
   if (signature === state.daeConfigSignature) {
     renderConfigMeta();
@@ -1219,10 +1791,11 @@ function applyDaeConfigDocument(doc) {
   }
   state.daeConfigSignature = signature;
   if (!state.daeConfigDirty) {
-    const content = typeof doc?.content === "string" ? doc.content : "";
-    state.daeConfigOriginal = content;
-    state.daeConfigContent = content;
-    state.daeConfigSections = parseConfigSections(content);
+    state.daeConfigDocuments = documents;
+    state.daeConfigSections = flattenDaeConfigSections(documents);
+    const documentSignature = daeConfigDocumentsContentSignature(documents);
+    state.daeConfigOriginal = documentSignature;
+    state.daeConfigContent = documentSignature;
     if (!state.daeConfigSections.some((section) => section.id === state.daeConfigSelected)) {
       state.daeConfigSelected = state.daeConfigSections[0]?.id || "";
     }
@@ -1278,6 +1851,95 @@ function refreshProxyCollections(rawProxies) {
 
 function currentGroup() {
   return state.groups.find((group) => group.name === state.selectedGroup) || null;
+}
+
+function normalizeDaeConfigDocuments(doc) {
+  const rawDocuments =
+    Array.isArray(doc?.documents) && doc.documents.length
+      ? doc.documents
+      : [
+          {
+            path: doc?.path || "",
+            relativePath: "",
+            content: doc?.content || "",
+            entry: true,
+            missing: false,
+          },
+        ];
+
+  const documents = rawDocuments.map((document, index) =>
+    createConfigDocumentMeta(
+      {
+        ...document,
+        content: normalizeConfigText(typeof document?.content === "string" ? document.content : ""),
+      },
+      index,
+    ),
+  );
+
+  if (!documents.length) {
+    return createFallbackConfigDocuments(DEFAULT_CONFIG_PLACEHOLDER);
+  }
+
+  const entryIndex = documents.findIndex((document) => document.entry);
+  if (entryIndex > 0) {
+    const [entryDocument] = documents.splice(entryIndex, 1);
+    documents.unshift({
+      ...entryDocument,
+      entry: true,
+    });
+  } else if (entryIndex < 0) {
+    documents[0].entry = true;
+  }
+
+  return documents.map((document, index) => ({
+    ...document,
+    documentKey: document.path || `document-${index}`,
+    entry: index === 0,
+  }));
+}
+
+function flattenDaeConfigSections(documents) {
+  return documents.flatMap((document, documentIndex) =>
+    parseConfigSections(document.content, {
+      ...document,
+      documentIndex,
+    }),
+  );
+}
+
+function serializeDaeConfigDocuments() {
+  const groupedContent = new Map();
+  state.daeConfigSections.forEach((section) => {
+    const chunks = groupedContent.get(section.documentKey) || [];
+    chunks.push(section.content);
+    groupedContent.set(section.documentKey, chunks);
+  });
+
+  return state.daeConfigDocuments.map((document) => ({
+    ...document,
+    content: (groupedContent.get(document.documentKey) || []).join(""),
+  }));
+}
+
+function daeConfigDocumentsContentSignature(documents) {
+  return stableJson(
+    documents.map((document) => ({
+      path: document.path || "",
+      relativePath: document.relativePath || "",
+      entry: Boolean(document.entry),
+      missing: Boolean(document.missing),
+      content: document.content || "",
+    })),
+  );
+}
+
+function selectedConfigDocument() {
+  const section = selectedConfigSection();
+  if (section) {
+    return state.daeConfigDocuments.find((document) => document.documentKey === section.documentKey) || state.daeConfigDocuments[0] || null;
+  }
+  return state.daeConfigDocuments[0] || null;
 }
 
 function computeLeafStats() {
@@ -2017,39 +2679,57 @@ function inferConfigSectionName(chunk, index, forcedName = "") {
   return index === 0 ? "document" : `section-${index + 1}`;
 }
 
-function buildConfigSection(chunk, index, forcedName = "") {
+function configSectionDescription(name) {
+  const key = CONFIG_SECTION_DESCRIPTIONS[name];
+  return key ? t(key, key) : t("config.section.document.summary", "Edit this dae config block as raw text.");
+}
+
+function buildConfigSection(chunk, index, forcedName = "", documentMeta = {}) {
   const content = normalizeConfigText(chunk);
   const name = inferConfigSectionName(content, index, forcedName);
   const editorData = parseConfigEditor(name, content);
+  const documentLabel = documentMeta.relativePath || documentMeta.path || "config.dae";
   return {
-    id: `${name}-${index}`,
+    id: `${documentMeta.documentKey || "document"}::${name}-${index}`,
     name,
-    title: name === "document" ? "Whole Document" : titleCase(name),
-    summary: CONFIG_SECTION_DESCRIPTIONS[name] || "编辑该顶层 dae 配置块的原始文本。",
+    title: name === "document" ? t("config.wholeDocument", "Whole Document") : titleCase(name),
+    summary: configSectionDescription(name),
     content,
     mode: supportsGuiSection(name) ? "gui" : "raw",
     editorData,
+    documentKey: documentMeta.documentKey || "document",
+    documentPath: documentMeta.path || "",
+    documentRelativePath: documentLabel,
+    documentEntry: Boolean(documentMeta.entry),
+    documentMissing: Boolean(documentMeta.missing),
+    documentIndex: Number(documentMeta.documentIndex || 0),
   };
 }
 
-function createConfigSection(name) {
+function createConfigSection(name, documentMeta = {}) {
   const editorData = createEmptyConfigEditor(name);
   const content = serializeConfigSectionContent(name, editorData, "");
   return {
-    id: `${name}-${Date.now()}`,
+    id: `${documentMeta.documentKey || "document"}::${name}-${Date.now()}`,
     name,
     title: titleCase(name),
-    summary: CONFIG_SECTION_DESCRIPTIONS[name] || "编辑该顶层 dae 配置块的原始文本。",
+    summary: configSectionDescription(name),
     content,
     mode: supportsGuiSection(name) ? "gui" : "raw",
     editorData,
+    documentKey: documentMeta.documentKey || "document",
+    documentPath: documentMeta.path || "",
+    documentRelativePath: documentMeta.relativePath || documentMeta.path || "config.dae",
+    documentEntry: Boolean(documentMeta.entry),
+    documentMissing: Boolean(documentMeta.missing),
+    documentIndex: Number(documentMeta.documentIndex || 0),
   };
 }
 
-function parseConfigSections(content) {
+function parseConfigSections(content, documentMeta = {}) {
   const text = normalizeConfigText(content);
   if (!text.trim()) {
-    return createFallbackSections("");
+    return [buildConfigSection("", 0, "document", documentMeta)];
   }
 
   const chunks = [];
@@ -2116,18 +2796,14 @@ function parseConfigSections(content) {
   }
 
   if (!chunks.length) {
-    return createFallbackSections(text);
+    return [buildConfigSection(text, 0, "document", documentMeta)];
   }
 
-  return chunks.map((chunk, index) => buildConfigSection(chunk, index));
-}
-
-function joinConfigSections() {
-  return state.daeConfigSections.map((section) => section.content).join("");
+  return chunks.map((chunk, index) => buildConfigSection(chunk, index, "", documentMeta));
 }
 
 function updateConfigDirtyState() {
-  state.daeConfigContent = joinConfigSections();
+  state.daeConfigContent = daeConfigDocumentsContentSignature(serializeDaeConfigDocuments());
   state.daeConfigDirty = state.daeConfigContent !== state.daeConfigOriginal;
   renderConfigMeta();
 }
@@ -2158,9 +2834,9 @@ function activeViewMeta() {
 
 function renderViewState() {
   const meta = activeViewMeta();
-  refs.pageEyebrow.textContent = meta.eyebrow;
-  refs.pageTitle.textContent = meta.title;
-  refs.pageBanner.textContent = meta.banner;
+  refs.pageEyebrow.textContent = t(meta.eyebrow, meta.eyebrow);
+  refs.pageTitle.textContent = t(meta.title, meta.title);
+  refs.pageBanner.textContent = t(meta.banner, meta.banner);
   refs.navItems.forEach((item) => {
     item.classList.toggle("active", item.dataset.view === state.currentView);
   });
@@ -2170,12 +2846,13 @@ function renderViewState() {
 }
 
 function renderVersionTitle() {
-  refs.versionLabel.textContent = state.version?.version || "unlinked";
+  refs.versionLabel.textContent = state.version?.version || t("common.unlinked", "Unlinked");
 }
 
 function renderHeaderStatus() {
-  refs.apiStatusText.textContent = state.apiStatus.message;
-  refs.sidebarControllerText.textContent = state.apiStatus.message.toLowerCase();
+  const statusText = resolveText(state.apiStatus.message, t("status.disconnected", "Disconnected"));
+  refs.apiStatusText.textContent = statusText;
+  refs.sidebarControllerText.textContent = statusText;
   refs.sidebarConnectionsValue.textContent = String(state.connections.total);
   refs.topConnectionsValue.textContent = String(state.connections.total);
   refs.apiStatusDot.classList.remove("offline", "warn");
@@ -2201,14 +2878,22 @@ function renderSystemStatus() {
   }
 
   const group = currentGroup();
-  refs.currentGroupName.textContent = group?.name || "No group";
+  refs.currentGroupName.textContent = group?.name || t("common.noGroup", "No group");
   refs.currentGroupMeta.textContent = group
-    ? `${group.type} · current: ${group.now || "none"} · ${group.all.length} node(s) · 右上角按钮测延迟`
-    : "连接控制器后加载代理组与节点。";
-  refs.dashboardCurrentGroupName.textContent = group?.name || "No group";
+    ? t("proxies.groupMeta", "{type} · current: {current} · {count} node(s) · use the top-right button to probe latency", {
+        type: group.type || t("common.selector", "selector"),
+        current: group.now || t("common.none", "None"),
+        count: group.all.length,
+      })
+    : t("proxies.groupMeta.pending", "Connect the controller to load proxy groups and nodes.");
+  refs.dashboardCurrentGroupName.textContent = group?.name || t("common.noGroup", "No group");
   refs.dashboardCurrentGroupMeta.textContent = group
-    ? `${group.type} · current: ${group.now || "none"} · ${group.all.length} node(s)`
-    : "连接控制器后加载代理组与节点。";
+    ? t("proxies.groupMeta.compact", "{type} · current: {current} · {count} node(s)", {
+        type: group.type || t("common.selector", "selector"),
+        current: group.now || t("common.none", "None"),
+        count: group.all.length,
+      })
+    : t("proxies.groupMeta.pending", "Connect the controller to load proxy groups and nodes.");
   refs.resetGroupButton.disabled = !group || state.busyGroups.has(group.name);
 }
 
@@ -2223,7 +2908,7 @@ function renderTrafficMeta() {
   refs.dashboardDownValue.textContent = formatByteRate(state.traffic.down);
 }
 
-function renderConnectionPreviewList(target, connections, emptyMessage = "暂无活动连接。") {
+function renderConnectionPreviewList(target, connections, emptyMessage = t("connections.empty", "No active connections.")) {
   if (!connections.length) {
     target.innerHTML = `<div class="proxy-empty">${escapeHtml(emptyMessage)}</div>`;
     return;
@@ -2257,15 +2942,18 @@ function renderTrafficConnectionsTable(connections) {
     .map((conn) => {
       const stateClass = classToken(conn.state, "active");
       const processLabel = conn.process || "-";
-      const pidLabel = Number(conn.pid) > 0 ? `PID ${conn.pid}` : "PID -";
+      const pidLabel =
+        Number(conn.pid) > 0 ? t("connections.pid", "PID {value}", { value: conn.pid }) : t("connections.pidUnknown", "PID -");
       const sourceLabel = formatConnectionLabel(conn.source, conn.sourceAddress, conn.sourcePort);
       const destinationLabel = formatConnectionLabel(conn.destination, conn.destinationAddress, conn.destinationPort);
       const sourceEndpoint = formatEndpoint(conn.sourceAddress, conn.sourcePort);
       const destinationEndpoint = formatEndpoint(conn.destinationAddress, conn.destinationPort);
       const outboundLabel = conn.outbound || "-";
       const directionLabel = conn.direction || "-";
-      const routingLabel = conn.hasRouting ? "Routing attached" : "Routing missing";
-      const policyLabel = conn.must ? "Must route" : "Normal route";
+      const routingLabel = conn.hasRouting
+        ? t("connections.routing.attached", "Routing attached")
+        : t("connections.routing.missing", "Routing missing");
+      const policyLabel = conn.must ? t("connections.policy.must", "Must route") : t("connections.policy.normal", "Normal route");
       const macLabel = conn.mac || "-";
       const lastSeenAgo = formatTimeAgo(conn.lastSeen);
       const lastSeenClock = formatClock(conn.lastSeen);
@@ -2296,20 +2984,20 @@ function renderTrafficConnectionsTable(connections) {
 
             <div class="connection-compact-route">
               <div class="connection-compact-endpoint">
-                <span class="connection-state-label">From</span>
+                <span class="connection-state-label">${escapeHtml(t("connections.from", "From"))}</span>
                 <strong>${escapeHtml(sourceLabel)}</strong>
                 <code class="table-route">${escapeHtml(sourceEndpoint)}</code>
               </div>
 
               <div class="connection-compact-endpoint">
-                <span class="connection-state-label">To</span>
+                <span class="connection-state-label">${escapeHtml(t("connections.to", "To"))}</span>
                 <strong>${escapeHtml(destinationLabel)}</strong>
                 <code class="table-route">${escapeHtml(destinationEndpoint)}</code>
               </div>
             </div>
 
             <div class="connection-state-meta connection-compact-meta">
-              <span class="meta-chip strong">Outbound ${escapeHtml(outboundLabel)}</span>
+              <span class="meta-chip strong">${escapeHtml(t("connections.outbound", "Outbound {name}", { name: outboundLabel }))}</span>
               <span class="meta-chip">${escapeHtml(directionLabel)}</span>
               <span class="meta-chip">↓ ${escapeHtml(downloadTotalLabel)} · ↑ ${escapeHtml(uploadTotalLabel)}</span>
             </div>
@@ -2341,58 +3029,58 @@ function renderTrafficConnectionsTable(connections) {
 
           <div class="connection-state-grid">
             <div class="connection-state-block is-download">
-              <span class="connection-state-label">Download</span>
+              <span class="connection-state-label">${escapeHtml(t("connections.download", "Download"))}</span>
               <strong>${escapeHtml(downloadRateLabel)}</strong>
-              <span class="table-secondary">Total ${escapeHtml(downloadTotalLabel)}</span>
+              <span class="table-secondary">${escapeHtml(`${t("traffic.total", "Total")} ${downloadTotalLabel}`)}</span>
             </div>
 
             <div class="connection-state-block is-upload">
-              <span class="connection-state-label">Upload</span>
+              <span class="connection-state-label">${escapeHtml(t("connections.upload", "Upload"))}</span>
               <strong>${escapeHtml(uploadRateLabel)}</strong>
-              <span class="table-secondary">Total ${escapeHtml(uploadTotalLabel)}</span>
+              <span class="table-secondary">${escapeHtml(`${t("traffic.total", "Total")} ${uploadTotalLabel}`)}</span>
             </div>
 
             <div class="connection-state-block is-source">
-              <span class="connection-state-label">Source</span>
+              <span class="connection-state-label">${escapeHtml(t("connections.source", "Source"))}</span>
               <strong>${escapeHtml(sourceLabel)}</strong>
               <code class="table-route">${escapeHtml(sourceEndpoint)}</code>
             </div>
 
             <div class="connection-state-block is-destination">
-              <span class="connection-state-label">Destination</span>
+              <span class="connection-state-label">${escapeHtml(t("connections.destination", "Destination"))}</span>
               <strong>${escapeHtml(destinationLabel)}</strong>
               <code class="table-route">${escapeHtml(destinationEndpoint)}</code>
             </div>
 
             <div class="connection-state-block is-routing">
-              <span class="connection-state-label">Routing</span>
+              <span class="connection-state-label">${escapeHtml(t("connections.routing", "Routing"))}</span>
               <strong>${escapeHtml(outboundLabel)}</strong>
               <span class="table-secondary">${escapeHtml(directionLabel)} · ${escapeHtml(routingLabel)}</span>
             </div>
 
             <div class="connection-state-block is-policy">
-              <span class="connection-state-label">Policy</span>
+              <span class="connection-state-label">${escapeHtml(t("connections.policy", "Policy"))}</span>
               <strong>${escapeHtml(policyLabel)}</strong>
-              <span class="table-secondary">Mark ${escapeHtml(conn.mark || 0)} · DSCP ${escapeHtml(conn.dscp || 0)}</span>
+              <span class="table-secondary">${escapeHtml(t("connections.markDscp", "Mark {mark} · DSCP {dscp}", { mark: conn.mark || 0, dscp: conn.dscp || 0 }))}</span>
             </div>
           </div>
 
           <div class="connection-state-meta">
-            <span class="meta-chip strong meta-outbound">Outbound ${escapeHtml(outboundLabel)}</span>
+            <span class="meta-chip strong meta-outbound">${escapeHtml(t("connections.outbound", "Outbound {name}", { name: outboundLabel }))}</span>
             <span class="meta-chip meta-pid">${escapeHtml(pidLabel)}</span>
-            <span class="meta-chip meta-seen">Seen ${escapeHtml(lastSeenClock)}</span>
-            <span class="meta-chip meta-total-down">Down ${escapeHtml(downloadTotalLabel)}</span>
-            <span class="meta-chip meta-total-up">Up ${escapeHtml(uploadTotalLabel)}</span>
+            <span class="meta-chip meta-seen">${escapeHtml(t("connections.seen", "Seen {time}", { time: lastSeenClock }))}</span>
+            <span class="meta-chip meta-total-down">${escapeHtml(`${t("connections.download", "Download")} ${downloadTotalLabel}`)}</span>
+            <span class="meta-chip meta-total-up">${escapeHtml(`${t("connections.upload", "Upload")} ${uploadTotalLabel}`)}</span>
             <span class="meta-chip meta-routing">${escapeHtml(routingLabel)}</span>
             <span class="meta-chip meta-policy">${escapeHtml(policyLabel)}</span>
-            <span class="meta-chip meta-mac">MAC ${escapeHtml(macLabel)}</span>
-            <span class="meta-chip meta-id">ID ${escapeHtml(conn.id || "-")}</span>
+            <span class="meta-chip meta-mac">${escapeHtml(t("connections.mac", "MAC {value}", { value: macLabel }))}</span>
+            <span class="meta-chip meta-id">${escapeHtml(t("connections.id", "ID {value}", { value: conn.id || "-" }))}</span>
           </div>
         </article>
       `;
     })
     .join("");
-  refs.trafficConnectionsEmpty.textContent = "暂无活动连接。";
+  refs.trafficConnectionsEmpty.textContent = t("connections.empty", "No active connections.");
   refs.trafficConnectionsEmpty.hidden = connections.length > 0;
 }
 
@@ -2401,26 +3089,26 @@ function renderConnections() {
   refs.dashboardConnectionsTcp.textContent = String(state.connections.tcp);
   refs.dashboardConnectionsUdp.textContent = String(state.connections.udp);
   refs.dashboardConnectionsUpdated.textContent = !state.connectionsAvailable
-    ? "当前 controller 未提供 /connections。"
+    ? t("connections.unavailable", "The current controller does not provide /connections.")
     : state.connections.updatedAt
-      ? `最近更新 ${formatClock(state.connections.updatedAt)}`
-      : "等待 /connections 数据。";
+      ? t("connections.updated", "Updated {time}", { time: formatClock(state.connections.updatedAt) })
+      : t("connections.waiting", "Waiting for /connections data.");
 
   refs.trafficConnectionsTotal.textContent = String(state.connections.total);
   refs.trafficConnectionsTcp.textContent = String(state.connections.tcp);
   refs.trafficConnectionsUdp.textContent = String(state.connections.udp);
   refs.trafficConnectionsUpdated.textContent = !state.connectionsAvailable
-    ? "当前 controller 未提供 /connections。"
+    ? t("connections.unavailable", "The current controller does not provide /connections.")
     : state.connections.updatedAt
-      ? `最近更新 ${formatClock(state.connections.updatedAt)}`
-      : "等待 /connections 数据。";
+      ? t("connections.updated", "Updated {time}", { time: formatClock(state.connections.updatedAt) })
+      : t("connections.waiting", "Waiting for /connections data.");
   refs.trafficSortSelect.value = state.connectionSort;
   refs.trafficSortSelect.disabled = !state.connectionsAvailable;
 
   if (!state.connectionsAvailable) {
-    renderConnectionPreviewList(refs.dashboardConnectionList, [], "当前 controller 未提供 /connections。");
+    renderConnectionPreviewList(refs.dashboardConnectionList, [], t("connections.unavailable", "The current controller does not provide /connections."));
     refs.trafficConnectionsList.innerHTML = "";
-    refs.trafficConnectionsEmpty.textContent = "当前 controller 未提供 /connections。";
+    refs.trafficConnectionsEmpty.textContent = t("connections.unavailable", "The current controller does not provide /connections.");
     refs.trafficConnectionsEmpty.hidden = false;
     return;
   }
@@ -2433,26 +3121,36 @@ function renderControllerPanel() {
   const connected = state.apiStatus.kind === "connected";
   const embedded = isEmbeddedUIPath();
   const authOnlyMode = embedded && !connected;
-  const summaryUrl = state.controllerUrl || (embedded ? window.location.origin : "") || "未连接";
+  const summaryUrl = state.controllerUrl || (embedded ? window.location.origin : "") || t("status.disconnected", "Disconnected");
   refs.controllerSummaryUrl.textContent = summaryUrl;
   refs.controllerSummaryMeta.textContent = connected
-    ? `已连接，${state.token ? "使用 Bearer token" : "未配置 token"}。`
+    ? state.token
+      ? t("shell.connected.withToken", "Connected with Bearer token.")
+      : t("shell.connected.noToken", "Connected without token.")
     : authOnlyMode
-      ? "当前页面已经运行在 dae 控制器上，只需要输入 token。"
-      : "输入地址与 token，连接 dae 控制器。";
-  refs.controllerPanelTitle.textContent = connected ? "Controller 已连接" : authOnlyMode ? "登录 dae 控制台" : "连接 dae External Controller";
+      ? t("shell.embedded.summary", "This page is already served by dae. Only the token is required.")
+      : t("shell.disconnected.summary", "Enter the controller address and token to connect to dae.");
+  refs.controllerPanelTitle.textContent = connected
+    ? t("shell.connected.title", "Controller Connected")
+    : authOnlyMode
+      ? t("shell.embedded.title", "Sign in to dae Console")
+      : t("shell.connect.title", "Connect to dae External Controller");
   refs.controllerHint.textContent =
-    authOnlyMode && state.controllerHintText === DEFAULT_CONTROLLER_HINT
-      ? "正在访问当前控制器。输入 token 后直接建立连接。"
-      : state.controllerHintText;
-  refs.runtimeLogLevelNote.textContent = state.runtimeLogLevelNoteText;
+    authOnlyMode && isMessageKey(state.controllerHintText, "shell.controllerHint")
+      ? t("shell.embedded.hint", "You are already on the current controller. Enter the token to connect directly.")
+      : resolveText(state.controllerHintText);
+  refs.runtimeLogLevelNote.textContent = resolveText(state.runtimeLogLevelNoteText);
   refs.connectButton.disabled = state.connecting;
-  refs.connectButton.textContent = state.connecting ? "登录中..." : connected ? "重新连接" : "登录";
+  refs.connectButton.textContent = state.connecting
+    ? t("shell.connecting", "Signing in...")
+    : connected
+      ? t("shell.reconnect", "Reconnect")
+      : t("shell.login", "Login");
   refs.controllerUrlField.hidden = authOnlyMode;
   refs.controllerUrl.readOnly = authOnlyMode;
   refs.controllerUrl.placeholder = embedded ? window.location.origin : "http://127.0.0.1:9090";
   refs.applyLogLevelButton.disabled = !state.controllerUrl || state.logLevelChanging || state.connecting;
-  refs.controllerTopToggle.textContent = connected ? "Controller" : "登录";
+  refs.controllerTopToggle.textContent = connected ? t("shell.controllerButton", "Controller") : t("shell.login", "Login");
   refs.controllerTopToggle.hidden = !connected;
 
   renderLayoutState();
@@ -2545,7 +3243,7 @@ function renderTimeLabels(target, { withSeconds = false } = {}) {
   target.innerHTML = indexes
     .map((index) => {
       const timestamp = state.trafficSeries.times[index] || Date.now();
-      const label = new Date(timestamp).toLocaleTimeString("zh-CN", {
+      const label = new Date(timestamp).toLocaleTimeString(normalizeLocale(state.locale), {
         hour: "2-digit",
         minute: "2-digit",
         second: withSeconds ? "2-digit" : undefined,
@@ -2623,17 +3321,17 @@ function proxyTabsMarkup() {
               type="button"
             >
               <strong>${escapeHtml(group.name)}</strong>
-              <span>${escapeHtml(group.type || "selector")}</span>
+              <span>${escapeHtml(group.type || t("common.selector", "selector"))}</span>
             </button>
           `,
         )
         .join("")
-    : `<div class="proxy-empty">No proxy groups returned by /proxies.</div>`;
+    : `<div class="proxy-empty">${escapeHtml(t("proxies.empty.groups", "No proxy groups were returned by /proxies."))}</div>`;
 }
 
 function proxyGridMarkup(group, { limit = 0, compact = false } = {}) {
   if (!group) {
-    return `<div class="proxy-empty">连接可用 controller 后加载组和节点数据。</div>`;
+    return `<div class="proxy-empty">${escapeHtml(t("proxies.empty.group", "Connect to an available controller to load groups and nodes."))}</div>`;
   }
 
   const proxyNames = limit > 0 ? group.all.slice(0, limit) : group.all;
@@ -2642,9 +3340,9 @@ function proxyGridMarkup(group, { limit = 0, compact = false } = {}) {
       const proxy = state.proxies[proxyName] || { name: proxyName, alive: false };
       const delay = proxyDelay(proxy);
       const active = group.now === proxyName;
-      const address = proxy.addr || proxy.address || "address unavailable";
+      const address = proxy.addr || proxy.address || t("proxies.address.unavailable", "address unavailable");
       const protocol = proxy.protocol || proxy.type || "unknown";
-      const delayText = !proxy.alive ? "0 ms" : delay === null ? "pending" : `${delay} ms`;
+      const delayText = !proxy.alive ? "0 ms" : delay === null ? t("proxies.delay.pending", "pending") : `${delay} ms`;
       const delayTone = proxyDelayTone(proxy, delay);
       const busyDelay = state.busyDelayNodes.has(proxyName);
       const busyGroup = state.busyGroups.has(group.name);
@@ -2656,7 +3354,7 @@ function proxyGridMarkup(group, { limit = 0, compact = false } = {}) {
             <button
               class="refresh"
               type="button"
-              aria-label="refresh delay"
+              aria-label="${escapeHtml(t("proxies.probe.aria", "refresh delay"))}"
               data-action="probe-delay"
               data-name="${escapeHtml(proxyName)}"
               ${busyDelay ? "disabled" : ""}
@@ -2668,7 +3366,7 @@ function proxyGridMarkup(group, { limit = 0, compact = false } = {}) {
 
           <div class="proxy-badges">
             <span class="proxy-badge">${escapeHtml(protocol)}</span>
-            <span class="proxy-badge ${proxy.alive ? "" : "dim"}">${proxy.alive ? "alive" : "down"}</span>
+            <span class="proxy-badge ${proxy.alive ? "" : "dim"}">${escapeHtml(proxy.alive ? t("proxies.status.alive", "alive") : t("proxies.status.down", "down"))}</span>
             ${proxy.subscriptionTag ? `<span class="proxy-badge dim">${escapeHtml(proxy.subscriptionTag)}</span>` : ""}
           </div>
 
@@ -2680,7 +3378,7 @@ function proxyGridMarkup(group, { limit = 0, compact = false } = {}) {
               data-name="${escapeHtml(proxyName)}"
               ${active || busyGroup ? "disabled" : ""}
             >
-              ${active ? "Selected" : "Use Node"}
+              ${escapeHtml(active ? t("proxies.node.selected", "Selected") : t("proxies.node.use", "Use Node"))}
             </button>
           </div>
         </article>
@@ -2707,22 +3405,25 @@ function configSectionCountText(section) {
     case "global": {
       const fields = GLOBAL_FIELD_DEFS.filter((field) => serializeConfigFieldValue(field, editor.fields[field.key])).length;
       const extras = editor.extraOptions.filter((row) => String(row.key || "").trim() && String(row.value || "").trim()).length;
-      return `${fields + extras} options`;
+      return t("config.count.options", "{value} options", { value: fields + extras });
     }
     case "subscription":
     case "node":
     case "include":
-      return `${editor.entries.length} item${editor.entries.length === 1 ? "" : "s"}`;
+      return t("config.count.items", "{value} items", { value: editor.entries.length });
     case "dns":
-      return `${editor.options.length} options · ${editor.blocks.length} blocks`;
+      return t("config.count.blocks", "{options} options · {blocks} blocks", {
+        options: editor.options.length,
+        blocks: editor.blocks.length,
+      });
     case "group":
-      return `${editor.groups.length} groups`;
+      return t("config.count.groups", "{value} groups", { value: editor.groups.length });
     case "routing": {
       const total = editor.rules.filter((rule) => String(rule.value || "").trim()).length + (editor.fallback ? 1 : 0);
-      return `${total} rules`;
+      return t("config.count.rules", "{value} rules", { value: total });
     }
     default:
-      return section.content.trim() ? "Raw section" : "Empty";
+      return section.content.trim() ? t("config.count.raw", "Raw section") : t("config.count.empty", "Empty");
   }
 }
 
@@ -2738,7 +3439,7 @@ function renderConfigModeSwitch(section) {
         data-section-mode="gui"
         type="button"
       >
-        Builder
+        ${escapeHtml(t("config.builder", "Builder"))}
       </button>
       <button
         class="config-mode-button ${section.mode === "raw" ? "active" : ""}"
@@ -2746,7 +3447,7 @@ function renderConfigModeSwitch(section) {
         data-section-mode="raw"
         type="button"
       >
-        Raw
+        ${escapeHtml(t("config.raw", "Raw"))}
       </button>
     </div>
   `;
@@ -2756,14 +3457,14 @@ function renderConfigAdvancedNote(section) {
   if (!section.editorData?.advancedRaw?.trim()) {
     return "";
   }
-  return `<p class="config-advanced-note">检测到未结构化内容，保存时会保留；切到 Raw 可以直接编辑这些内容。</p>`;
+  return `<p class="config-advanced-note">${escapeHtml(t("config.advanced", "Unstructured content was detected and will be preserved on save."))}</p>`;
 }
 
 function renderConfigSectionToolbar(section) {
   return `
     <div class="config-section-toolbar">
       ${renderConfigModeSwitch(section)}
-      <button class="config-section-remove" data-remove-section="${escapeHtml(section.id)}" type="button">Delete Section</button>
+      <button class="config-section-remove" data-remove-section="${escapeHtml(section.id)}" type="button">${escapeHtml(t("config.deleteSection", "Delete Section"))}</button>
     </div>
   `;
 }
@@ -2772,7 +3473,7 @@ function renderConfigFieldControl(sectionId, field, value) {
   if (field.type === "select") {
     return `
       <select data-section="${escapeHtml(sectionId)}" data-config-field="${escapeHtml(field.key)}">
-        <option value="">Not set</option>
+        <option value="">${escapeHtml(t("common.notSet", "Not set"))}</option>
         ${field.options
           .map(
             (option) => `
@@ -2787,7 +3488,7 @@ function renderConfigFieldControl(sectionId, field, value) {
   if (field.type === "boolean") {
     return `
       <select data-section="${escapeHtml(sectionId)}" data-config-field="${escapeHtml(field.key)}">
-        <option value="" ${!value ? "selected" : ""}>Not set</option>
+        <option value="" ${!value ? "selected" : ""}>${escapeHtml(t("common.notSet", "Not set"))}</option>
         <option value="true" ${value === "true" ? "selected" : ""}>true</option>
         <option value="false" ${value === "false" ? "selected" : ""}>false</option>
       </select>
@@ -2838,7 +3539,7 @@ function renderConfigGlobalBuilder(section) {
               data-index="${index}"
               type="button"
             >
-              Remove
+              ${escapeHtml(t("config.remove", "Remove"))}
             </button>
           </div>
         </div>
@@ -2862,8 +3563,8 @@ function renderConfigGlobalBuilder(section) {
     <div class="config-builder-panel">
       <div class="config-panel-head">
         <div>
-          <h4>Additional Options</h4>
-          <p>不在上面表单里的 global 键值，直接以 <code>key: value</code> 追加。</p>
+          <h4>${escapeHtml(t("config.additionalOptions.title", "Additional Options"))}</h4>
+          <p>${escapeHtml(t("config.additionalOptions.note", "Append extra global key/value options as key: value lines."))}</p>
         </div>
         <button
           class="action-button ghost"
@@ -2872,11 +3573,11 @@ function renderConfigGlobalBuilder(section) {
           data-template="key-value"
           type="button"
         >
-          Add Option
+          ${escapeHtml(t("config.option.add", "Add Option"))}
         </button>
       </div>
       <div class="config-row-list">
-        ${rows || '<div class="config-empty-state">暂无额外选项。</div>'}
+        ${rows || `<div class="config-empty-state">${escapeHtml(t("config.extra.empty", "No extra options yet."))}</div>`}
       </div>
     </div>
     ${renderConfigAdvancedNote(section)}
@@ -2927,7 +3628,7 @@ function renderConfigListBuilder(section) {
               data-index="${index}"
               type="button"
             >
-              Remove
+              ${escapeHtml(t("config.remove", "Remove"))}
             </button>
           </div>
         </div>
@@ -2940,7 +3641,7 @@ function renderConfigListBuilder(section) {
     <div class="config-builder-panel">
       <div class="config-panel-head">
         <div>
-          <h4>${escapeHtml(section.title)} Entries</h4>
+          <h4>${escapeHtml(section.title)} ${escapeHtml(t("config.entries.title", "Entries"))}</h4>
           <p>${escapeHtml(section.summary)}</p>
         </div>
         <button
@@ -2950,11 +3651,11 @@ function renderConfigListBuilder(section) {
           data-template="tagged-entry"
           type="button"
         >
-          ${isInclude ? "Add Include" : `Add ${escapeHtml(section.title)}`}
+          ${escapeHtml(isInclude ? t("config.include.add", "Add Include") : `${t("config.addSection", "Add Section")} ${section.title}`)}
         </button>
       </div>
       <div class="config-row-list">
-        ${rows || '<div class="config-empty-state">暂无条目。</div>'}
+        ${rows || `<div class="config-empty-state">${escapeHtml(t("config.list.empty", "No entries yet."))}</div>`}
       </div>
     </div>
     ${renderConfigAdvancedNote(section)}
@@ -2992,7 +3693,7 @@ function renderConfigDnsBuilder(section) {
               data-index="${index}"
               type="button"
             >
-              Remove
+              ${escapeHtml(t("config.remove", "Remove"))}
             </button>
           </div>
         </div>
@@ -3006,8 +3707,8 @@ function renderConfigDnsBuilder(section) {
         <div class="config-block-card">
           <div class="config-block-head">
             <div>
-              <h4>Nested Block</h4>
-              <p>像 <code>upstream</code>、<code>routing</code> 这样的 dns 子块。</p>
+              <h4>${escapeHtml(t("config.dns.block.title", "Nested Block"))}</h4>
+              <p>${t("config.dns.block.note", "dns child blocks such as <code>upstream</code> or <code>routing</code>.")}</p>
             </div>
             <button
               class="config-row-remove"
@@ -3016,7 +3717,7 @@ function renderConfigDnsBuilder(section) {
               data-index="${index}"
               type="button"
             >
-              Remove
+              ${escapeHtml(t("config.remove", "Remove"))}
             </button>
           </div>
           <input
@@ -3046,8 +3747,8 @@ function renderConfigDnsBuilder(section) {
     <div class="config-builder-panel">
       <div class="config-panel-head">
         <div>
-          <h4>Top-level Options</h4>
-          <p>DNS 顶层的简单键值项。</p>
+          <h4>${escapeHtml(t("config.dns.options.title", "Top-level Options"))}</h4>
+          <p>${escapeHtml(t("config.dns.options.note", "Simple key/value items at the top level of dns."))}</p>
         </div>
         <button
           class="action-button ghost"
@@ -3056,19 +3757,19 @@ function renderConfigDnsBuilder(section) {
           data-template="key-value"
           type="button"
         >
-          Add Option
+          ${escapeHtml(t("config.option.add", "Add Option"))}
         </button>
       </div>
       <div class="config-row-list">
-        ${optionRows || '<div class="config-empty-state">暂无顶层项。</div>'}
+        ${optionRows || `<div class="config-empty-state">${escapeHtml(t("config.dns.options.empty", "No top-level options yet."))}</div>`}
       </div>
     </div>
 
     <div class="config-builder-panel">
       <div class="config-panel-head">
         <div>
-          <h4>Nested Blocks</h4>
-          <p>GUI 里直接新增 <code>upstream</code>、<code>routing</code> 等块。</p>
+          <h4>${escapeHtml(t("config.dns.blocks.title", "Nested Blocks"))}</h4>
+          <p>${escapeHtml(t("config.dns.blocks.note", "Add upstream, routing, and other nested blocks directly from the GUI."))}</p>
         </div>
         <button
           class="action-button ghost"
@@ -3077,11 +3778,11 @@ function renderConfigDnsBuilder(section) {
           data-template="named-block"
           type="button"
         >
-          Add Block
+          ${escapeHtml(t("config.block.add", "Add Block"))}
         </button>
       </div>
       <div class="config-block-list">
-        ${blockRows || '<div class="config-empty-state">暂无嵌套块。</div>'}
+        ${blockRows || `<div class="config-empty-state">${escapeHtml(t("config.dns.blocks.empty", "No nested blocks yet."))}</div>`}
       </div>
     </div>
     ${renderConfigAdvancedNote(section)}
@@ -3095,8 +3796,8 @@ function renderConfigGroupBuilder(section) {
         <div class="config-block-card">
           <div class="config-block-head">
             <div>
-              <h4>Proxy Group</h4>
-              <p>在这里添加分组名，并填 policy、filter 等规则。</p>
+              <h4>${escapeHtml(t("config.group.block.title", "Proxy Group"))}</h4>
+              <p>${escapeHtml(t("config.group.block.note", "Add the group name here and fill in policy, filter, and related rules."))}</p>
             </div>
             <button
               class="config-row-remove"
@@ -3105,7 +3806,7 @@ function renderConfigGroupBuilder(section) {
               data-index="${index}"
               type="button"
             >
-              Remove
+              ${escapeHtml(t("config.remove", "Remove"))}
             </button>
           </div>
           <input
@@ -3135,8 +3836,8 @@ function renderConfigGroupBuilder(section) {
     <div class="config-builder-panel">
       <div class="config-panel-head">
         <div>
-          <h4>Groups</h4>
-          <p>每个 group 单独一个卡片，方便新增和整理策略块。</p>
+          <h4>${escapeHtml(t("config.group.title", "Groups"))}</h4>
+          <p>${escapeHtml(t("config.group.note", "Each proxy group gets its own card for easier editing and organization."))}</p>
         </div>
         <button
           class="action-button ghost"
@@ -3145,11 +3846,11 @@ function renderConfigGroupBuilder(section) {
           data-template="named-block"
           type="button"
         >
-          Add Group
+          ${escapeHtml(t("config.group.add", "Add Group"))}
         </button>
       </div>
       <div class="config-block-list">
-        ${groups || '<div class="config-empty-state">暂无 group。</div>'}
+        ${groups || `<div class="config-empty-state">${escapeHtml(t("config.group.empty", "No groups yet."))}</div>`}
       </div>
     </div>
     ${renderConfigAdvancedNote(section)}
@@ -3178,7 +3879,7 @@ function renderConfigRoutingBuilder(section) {
               data-index="${index}"
               type="button"
             >
-              Remove
+              ${escapeHtml(t("config.remove", "Remove"))}
             </button>
           </div>
         </div>
@@ -3191,8 +3892,8 @@ function renderConfigRoutingBuilder(section) {
     <div class="config-builder-panel">
       <div class="config-panel-head">
         <div>
-          <h4>Routing Rules</h4>
-          <p>按顺序添加规则，右侧删除，最后单独维护 fallback。</p>
+          <h4>${escapeHtml(t("config.routing.title", "Routing Rules"))}</h4>
+          <p>${escapeHtml(t("config.routing.note", "Add rules in order, remove them on the right, and keep fallback separately."))}</p>
         </div>
         <button
           class="action-button ghost"
@@ -3201,17 +3902,17 @@ function renderConfigRoutingBuilder(section) {
           data-template="rule"
           type="button"
         >
-          Add Rule
+          ${escapeHtml(t("config.rule.add", "Add Rule"))}
         </button>
       </div>
       <div class="config-row-list">
-        ${rules || '<div class="config-empty-state">暂无路由规则。</div>'}
+        ${rules || `<div class="config-empty-state">${escapeHtml(t("config.routing.empty", "No routing rules yet."))}</div>`}
       </div>
     </div>
 
     <div class="config-form-grid">
       <div class="config-field">
-        <label>Fallback</label>
+        <label>${escapeHtml(t("config.fallback", "Fallback"))}</label>
         <input
           data-section="${escapeHtml(section.id)}"
           data-config-field="fallback"
@@ -3264,7 +3965,7 @@ function renderConfigSectionBody(section) {
 
 function renderConfigSectionTabs(openSectionIds) {
   if (!state.daeConfigSections.length) {
-    refs.configSectionTabs.innerHTML = '<div class="config-empty-state">暂无可编辑 section。</div>';
+    refs.configSectionTabs.innerHTML = `<div class="config-empty-state">${escapeHtml(t("config.empty.sections", "No editable sections yet."))}</div>`;
     return;
   }
 
@@ -3284,8 +3985,17 @@ function renderConfigSectionTabs(openSectionIds) {
               <p>${escapeHtml(section.summary)}</p>
             </div>
             <div class="config-section-side">
+              <span class="config-doc-chip ${section.documentEntry ? "entry" : ""} ${section.documentMissing ? "missing" : ""}">
+                ${escapeHtml(
+                  section.documentEntry
+                    ? `${t("config.badge.entry", "Entry")} · ${section.documentRelativePath}`
+                    : section.documentMissing
+                      ? `${t("config.badge.missing", "Missing")} · ${section.documentRelativePath}`
+                      : section.documentRelativePath,
+                )}
+              </span>
               <span class="config-section-count">${escapeHtml(configSectionCountText(section))}</span>
-              <span class="config-mode-chip ${section.mode === "raw" ? "raw" : ""}">${section.mode === "raw" ? "Raw" : "GUI"}</span>
+              <span class="config-mode-chip ${section.mode === "raw" ? "raw" : ""}">${escapeHtml(section.mode === "raw" ? t("config.raw", "Raw") : t("config.builder", "Builder"))}</span>
               <span class="config-section-arrow" aria-hidden="true"></span>
             </div>
           </summary>
@@ -3298,14 +4008,17 @@ function renderConfigSectionTabs(openSectionIds) {
 
 function renderConfigMeta() {
   const section = selectedConfigSection();
+  const selectedDocument = selectedConfigDocument();
   refs.configPathValue.textContent = state.daeConfigPath || "-";
   refs.saveConfigButton.disabled = !state.controllerUrl || !state.daeConfigDirty;
   refs.refreshConfigButton.disabled = !state.controllerUrl;
   refs.configSectionTypeSelect.disabled = !state.controllerUrl;
   refs.addConfigSectionButton.disabled = !state.controllerUrl;
   refs.configSectionsCountValue.textContent = String(state.daeConfigSections.length);
-  refs.configCurrentSectionValue.textContent = section?.title || "-";
-  refs.editorNote.textContent = state.editorNoteText;
+  refs.configCurrentSectionValue.textContent = section
+    ? `${section.title} @ ${selectedDocument?.relativePath || section.documentRelativePath}`
+    : "-";
+  refs.editorNote.textContent = resolveText(state.editorNoteText);
 }
 
 function renderDaeConfigEditor(openSectionIds) {
@@ -3315,21 +4028,23 @@ function renderDaeConfigEditor(openSectionIds) {
 
 function renderLogs() {
   refs.logsLevelSelect.value = state.logsLevel;
-  refs.toggleLogsButton.textContent = state.logsPaused ? "Resume" : "Pause";
+  refs.toggleLogsButton.textContent = state.logsPaused ? t("common.resume", "Resume") : t("common.pause", "Pause");
   refs.toggleLogsButton.disabled = !state.controllerUrl;
   refs.clearLogsButton.disabled = state.logs.length === 0;
   refs.logsLevelSelect.disabled = !state.controllerUrl;
 
-  let statusText = `Waiting for live events from /logs?format=structured&level=${state.logsLevel}.`;
+  let statusText = t("logs.status.waiting", "Waiting for live events from /logs?format=structured&level={level}.", {
+    level: state.logsLevel,
+  });
   const currentState = wsState("logs");
   if (!state.controllerUrl) {
-    statusText = "连接 controller 后开启日志流。";
+    statusText = t("logs.status.offline", "Connect the controller to start the log stream.");
   } else if (state.logsPaused) {
-    statusText = "本地已暂停日志流，恢复后继续接收新事件。";
+    statusText = t("logs.status.paused", "The local log stream is paused. Resume to keep receiving new events.");
   } else if (currentState === "live") {
-    statusText = `Streaming live logs at level ${state.logsLevel}.`;
+    statusText = t("logs.status.live", "Streaming live logs at level {level}.", { level: state.logsLevel });
   } else if (currentState === "retrying" || currentState === "opening") {
-    statusText = `Reconnecting /logs stream at level ${state.logsLevel}.`;
+    statusText = t("logs.status.retrying", "Reconnecting the /logs stream at level {level}.", { level: state.logsLevel });
   }
   refs.logsStatusText.textContent = statusText;
 
@@ -3353,6 +4068,10 @@ function renderLogs() {
 }
 
 function renderAll() {
+  applyStaticI18n();
+  if (refs.localeSelect) {
+    refs.localeSelect.value = normalizeLocale(state.locale);
+  }
   renderLayoutState();
   renderViewState();
   renderVersionTitle();
@@ -3427,9 +4146,8 @@ async function refreshSnapshot(updateStatus = true) {
     const snapshot = await fetchFullSnapshot();
     applyFullSnapshot(snapshot);
     if (updateStatus) {
-      setApiStatus("connected", "Connected");
-      state.controllerHintText =
-        "已连接，实时数据正在同步。";
+      setApiStatus("connected", msg("status.connected", "Connected"));
+      state.controllerHintText = msg("shell.hint.connected", "Connected. Live data is syncing now.");
       state.controllerExpanded = false;
       openLiveChannels();
       renderAll();
@@ -3447,11 +4165,11 @@ function handleConnectionError(error) {
   state.controllerExpanded = true;
 
   if (error.status === 401) {
-    setApiStatus("warn", "Unauthorized");
-    state.controllerHintText = "登录失败，请确认 token 正确。";
+    setApiStatus("warn", msg("status.unauthorized", "Unauthorized"));
+    state.controllerHintText = msg("shell.hint.unauthorized", "Sign-in failed. Confirm the token is correct.");
   } else {
-    setApiStatus("offline", "Unavailable");
-    state.controllerHintText = "无法连接 controller，请确认 dae 正在运行。";
+    setApiStatus("offline", msg("status.unavailable", "Unavailable"));
+    state.controllerHintText = msg("shell.hint.unavailable", "Unable to reach the controller. Confirm dae is running.");
   }
 
   renderAll();
@@ -3473,8 +4191,8 @@ async function connectController() {
   closeAllSockets();
   resetLiveState();
   setBusyState(true);
-  setApiStatus("warn", "Connecting");
-  state.controllerHintText = "正在连接 controller 并建立实时通道。";
+  setApiStatus("warn", msg("status.connecting", "Connecting"));
+  state.controllerHintText = msg("shell.hint.connecting", "Connecting to the controller and opening live channels.");
   renderAll();
   await refreshSnapshot(true);
   setBusyState(false);
@@ -3497,10 +4215,12 @@ async function resyncControllerAfterConfigSave() {
       const snapshot = await fetchFullSnapshot();
       state.daeConfigDirty = false;
       applyFullSnapshot(snapshot);
-      setApiStatus("connected", "Connected");
-      state.controllerHintText = "已连接，实时数据正在同步。";
+      setApiStatus("connected", msg("status.connected", "Connected"));
+      state.controllerHintText = msg("shell.hint.connected", "Connected. Live data is syncing now.");
       openLiveChannels();
-      state.editorNoteText = `Saved ${state.daeConfigPath || "config.dae"} and reloaded dae.`;
+      state.editorNoteText = msg("config.message.savedReloaded", "Saved {path} and reloaded dae.", {
+        path: state.daeConfigPath || "config.dae",
+      });
       renderAll();
       return;
     } catch (error) {
@@ -3510,7 +4230,9 @@ async function resyncControllerAfterConfigSave() {
 
   if (lastError) {
     handleConnectionError(lastError);
-    state.editorNoteText = `Config was written, but dae did not come back cleanly: ${lastError.message}`;
+    state.editorNoteText = msg("config.message.writtenReloadFailed", "Config was written, but dae did not come back cleanly: {error}", {
+      error: lastError.message,
+    });
     renderDaeConfigEditor();
   }
 }
@@ -3523,15 +4245,31 @@ async function saveDaeConfig() {
   refs.saveConfigButton.disabled = true;
   refs.refreshConfigButton.disabled = true;
   try {
+    const documents = serializeDaeConfigDocuments();
+    const entryDocument = documents.find((document) => document.entry) || documents[0] || { path: state.daeConfigPath, content: "" };
     await apiFetch("/configs/dae", {
       method: "PUT",
-      body: JSON.stringify({ content: state.daeConfigContent }),
+      body: JSON.stringify({
+        path: entryDocument.path || state.daeConfigPath,
+        content: entryDocument.content || "",
+        documents: documents.map((document) => ({
+          path: document.path,
+          relativePath: document.relativePath,
+          content: document.content,
+          entry: Boolean(document.entry),
+          missing: Boolean(document.missing),
+        })),
+      }),
     });
-    state.editorNoteText = `Saved ${state.daeConfigPath || "config.dae"}. Waiting for dae to reload...`;
+    state.editorNoteText = msg("config.message.savedWaiting", "Saved {path}. Waiting for dae to reload...", {
+      path: state.daeConfigPath || "config.dae",
+    });
     renderDaeConfigEditor();
     await resyncControllerAfterConfigSave();
   } catch (error) {
-    state.editorNoteText = `Failed to save config.dae: ${error.message}`;
+    state.editorNoteText = msg("config.message.saveFailed", "Failed to save config.dae: {error}", {
+      error: error.message,
+    });
     renderDaeConfigEditor();
   }
 }
@@ -3543,7 +4281,7 @@ async function updateRuntimeLogLevel() {
 
   const level = refs.runtimeLogLevelSelect.value;
   if (!LOG_LEVELS.includes(level)) {
-    state.runtimeLogLevelNoteText = `Unsupported log level: ${level}`;
+    state.runtimeLogLevelNoteText = msg("shell.logLevel.unsupported", "Unsupported log level: {level}", { level });
     renderControllerPanel();
     return;
   }
@@ -3560,9 +4298,11 @@ async function updateRuntimeLogLevel() {
       ...(state.config || {}),
       "log-level": level,
     });
-    state.runtimeLogLevelNoteText = `Runtime log level updated to ${level}.`;
+    state.runtimeLogLevelNoteText = msg("shell.logLevel.updated", "Runtime log level updated to {level}.", { level });
   } catch (error) {
-    state.runtimeLogLevelNoteText = `Failed to update runtime log level: ${error.message}`;
+    state.runtimeLogLevelNoteText = msg("shell.logLevel.failed", "Failed to update runtime log level: {error}", {
+      error: error.message,
+    });
   } finally {
     state.logLevelChanging = false;
     renderControllerPanel();
@@ -3581,9 +4321,15 @@ async function probeDelay(name) {
       state.proxies[name].history = [{ delay: payload.delay, time: new Date().toISOString() }];
       state.proxySignature = proxySnapshotSignature(state.proxies);
     }
-    state.editorNoteText = `Latency probe for ${name} returned ${payload.delay} ms from /proxies/${name}/delay.`;
+    state.editorNoteText = msg("proxies.latency.result", "Latency probe for {name} returned {delay} ms from /proxies/{name}/delay.", {
+      name,
+      delay: payload.delay,
+    });
   } catch (error) {
-    state.editorNoteText = `Latency probe failed for ${name}: ${error.message}`;
+    state.editorNoteText = msg("proxies.latency.failed", "Latency probe failed for {name}: {error}", {
+      name,
+      error: error.message,
+    });
   } finally {
     state.busyDelayNodes.delete(name);
     renderProxyGrid();
@@ -3613,9 +4359,16 @@ async function selectProxy(name) {
       };
       state.proxySignature = proxySnapshotSignature(state.proxies);
     }
-    state.editorNoteText = `Switched group ${group.name} to ${name} through /proxies/${group.name}.`;
+    state.editorNoteText = msg("proxies.switch.result", "Switched {group} to {name} through /proxies/{group}.", {
+      group: group.name,
+      name,
+    });
   } catch (error) {
-    state.editorNoteText = `Failed to switch ${group.name} to ${name}: ${error.message}`;
+    state.editorNoteText = msg("proxies.switch.failed", "Failed to switch {group} to {name}: {error}", {
+      group: group.name,
+      name,
+      error: error.message,
+    });
   } finally {
     state.busyGroups.delete(group.name);
     renderSystemStatus();
@@ -3637,9 +4390,14 @@ async function resetGroup() {
     await apiFetch(`/proxies/${encodeURIComponent(group.name)}`, {
       method: "DELETE",
     });
-    state.editorNoteText = `Reset group ${group.name} to its default policy via DELETE /proxies/${group.name}.`;
+    state.editorNoteText = msg("proxies.reset.result", "Reset {group} to its default policy through DELETE /proxies/{group}.", {
+      group: group.name,
+    });
   } catch (error) {
-    state.editorNoteText = `Failed to reset ${group.name}: ${error.message}`;
+    state.editorNoteText = msg("proxies.reset.failed", "Failed to reset {group}: {error}", {
+      group: group.name,
+      error: error.message,
+    });
   } finally {
     state.busyGroups.delete(group.name);
     renderSystemStatus();
@@ -3706,6 +4464,10 @@ function findConfigSectionById(sectionId) {
   return state.daeConfigSections.find((section) => section.id === sectionId) || null;
 }
 
+function findConfigDocumentByKey(documentKey) {
+  return state.daeConfigDocuments.find((document) => document.documentKey === documentKey) || null;
+}
+
 function syncConfigSectionContent(section) {
   section.content = serializeConfigSectionContent(section.name, section.editorData, section.content);
 }
@@ -3732,16 +4494,28 @@ function removeConfigSection(sectionId) {
 
   const openSectionIds = currentOpenConfigSectionIds().filter((id) => id !== sectionId);
   const [removed] = state.daeConfigSections.splice(index, 1);
-  if (!state.daeConfigSections.length) {
-    state.daeConfigSections = createFallbackSections("");
-    openSectionIds.push(state.daeConfigSections[0].id);
+  const sameDocumentSections = state.daeConfigSections.filter((section) => section.documentKey === removed.documentKey);
+  if (!sameDocumentSections.length) {
+    const document = findConfigDocumentByKey(removed.documentKey) || {
+      documentKey: removed.documentKey,
+      path: removed.documentPath,
+      relativePath: removed.documentRelativePath,
+      entry: removed.documentEntry,
+      missing: removed.documentMissing,
+      documentIndex: removed.documentIndex,
+    };
+    const fallbackSection = buildConfigSection("", 0, "document", document);
+    state.daeConfigSections.splice(index, 0, fallbackSection);
+    openSectionIds.push(fallbackSection.id);
   }
 
   if (state.daeConfigSelected === sectionId || !findConfigSectionById(state.daeConfigSelected)) {
     state.daeConfigSelected = state.daeConfigSections[Math.min(index, state.daeConfigSections.length - 1)]?.id || "";
   }
 
-  state.editorNoteText = `Removed ${removed.title} section. Save to apply.`;
+  state.editorNoteText = msg("config.message.removed", "Removed {section}. Save to apply.", {
+    section: removed.title,
+  });
   updateConfigDirtyState();
   renderDaeConfigEditor(openSectionIds);
 }
@@ -3890,15 +4664,24 @@ function bindEvents() {
   });
 
   refs.controllerTopToggle.addEventListener("click", toggleControllerPanel);
+  refs.localeSelect?.addEventListener("change", (event) => {
+    state.locale = normalizeLocale(event.target.value);
+    persistUiPrefs();
+    renderAll();
+  });
 
   refs.refreshConfigButton.addEventListener("click", () => {
     loadDaeConfigDocument()
       .then(() => {
-        state.editorNoteText = state.daeConfigPath ? `Reloaded ${state.daeConfigPath} from disk.` : "Reloaded config.dae from disk.";
+        state.editorNoteText = msg("config.message.reloaded", "Reloaded {path} from disk.", {
+          path: state.daeConfigPath || "config.dae",
+        });
         renderDaeConfigEditor();
       })
       .catch((error) => {
-        state.editorNoteText = `Failed to reload config.dae: ${error.message}`;
+        state.editorNoteText = msg("config.message.reloadFailed", "Failed to reload config.dae: {error}", {
+          error: error.message,
+        });
         renderDaeConfigEditor();
       });
   });
@@ -3912,17 +4695,32 @@ function bindEvents() {
     if (!CONFIG_SECTION_TYPES.includes(name)) {
       return;
     }
-    const existing = state.daeConfigSections.find((section) => section.name === name);
+    const document = selectedConfigDocument() || state.daeConfigDocuments[0];
+    const existing = state.daeConfigSections.find(
+      (section) => section.name === name && section.documentKey === document?.documentKey,
+    );
     if (existing) {
       state.daeConfigSelected = existing.id;
-      state.editorNoteText = `${existing.title} section already exists.`;
+      state.editorNoteText = msg("config.message.exists", "{section} already exists.", {
+        section: existing.title,
+      });
       renderDaeConfigEditor([...currentOpenConfigSectionIds(), existing.id]);
       return;
     }
-    const section = createConfigSection(name);
-    state.daeConfigSections.push(section);
+    const section = createConfigSection(name, document || {});
+    state.daeConfigSections = state.daeConfigSections.filter(
+      (item) => !(item.documentKey === section.documentKey && item.name === "document" && !item.content.trim()),
+    );
+    const insertAfter = state.daeConfigSections.reduce(
+      (lastIndex, item, itemIndex) => (item.documentKey === section.documentKey ? itemIndex : lastIndex),
+      -1,
+    );
+    state.daeConfigSections.splice(insertAfter + 1, 0, section);
     state.daeConfigSelected = section.id;
-    state.editorNoteText = `Added ${section.title} section.`;
+    state.editorNoteText = msg("config.message.added", "Added {section} in {path}.", {
+      section: section.title,
+      path: section.documentRelativePath,
+    });
     updateConfigDirtyState();
     renderDaeConfigEditor([...currentOpenConfigSectionIds(), section.id]);
   });

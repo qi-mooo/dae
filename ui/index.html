@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>daed UI Demo</title>
+    <title data-i18n="app.title">daed UI Demo</title>
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="./styles.css" />
   </head>
@@ -28,38 +28,38 @@
 
         <nav class="nav">
           <div class="nav-group">
-            <p class="nav-title">Workspace</p>
+            <p class="nav-title" data-i18n="nav.workspace">Workspace</p>
 
             <button class="nav-item active" data-view="dashboard" type="button">
               <span class="nav-icon" aria-hidden="true"></span>
-              <span class="nav-text">Dashboard</span>
+              <span class="nav-text" data-i18n="nav.dashboard">Dashboard</span>
             </button>
             <button class="nav-item" data-view="proxies" type="button">
               <span class="nav-icon" aria-hidden="true"></span>
-              <span class="nav-text">Proxies</span>
+              <span class="nav-text" data-i18n="nav.proxies">Proxies</span>
             </button>
             <button class="nav-item" data-view="traffic" type="button">
               <span class="nav-icon" aria-hidden="true"></span>
-              <span class="nav-text">Traffic</span>
+              <span class="nav-text" data-i18n="nav.traffic">Traffic</span>
             </button>
             <button class="nav-item" data-view="configs" type="button">
               <span class="nav-icon" aria-hidden="true"></span>
-              <span class="nav-text">Config</span>
+              <span class="nav-text" data-i18n="nav.configs">Config</span>
             </button>
             <button class="nav-item" data-view="logs" type="button">
               <span class="nav-icon" aria-hidden="true"></span>
-              <span class="nav-text">Logs</span>
+              <span class="nav-text" data-i18n="nav.logs">Logs</span>
             </button>
           </div>
         </nav>
 
         <div class="sidebar-status">
           <div class="sidebar-pill">
-            <span>Controller</span>
+            <span data-i18n="shell.controller">Controller</span>
             <strong id="sidebarControllerText">offline</strong>
           </div>
           <div class="sidebar-pill">
-            <span>Connections</span>
+            <span data-i18n="shell.connections">Connections</span>
             <strong id="sidebarConnectionsValue">0</strong>
           </div>
         </div>
@@ -79,28 +79,36 @@
           </div>
 
           <div class="topbar-actions">
+            <label class="locale-chip">
+              <span data-i18n="shell.language">语言</span>
+              <select id="localeSelect">
+                <option value="zh-CN">简体中文</option>
+                <option value="en">English</option>
+              </select>
+            </label>
+
             <div class="status-chip">
-              <span>Status</span>
+              <span data-i18n="shell.status">Status</span>
               <strong id="apiStatusText">Disconnected</strong>
               <span class="dot offline" id="apiStatusDot"></span>
             </div>
 
             <div class="speed-chip">
-              <span>Up</span>
+              <span data-i18n="shell.up">Up</span>
               <strong id="uploadRate">0 B/s</strong>
             </div>
 
             <div class="speed-chip">
-              <span>Down</span>
+              <span data-i18n="shell.down">Down</span>
               <strong id="downloadRate">0 B/s</strong>
             </div>
 
             <div class="speed-chip">
-              <span>Connections</span>
+              <span data-i18n="shell.connections">Connections</span>
               <strong id="topConnectionsValue">0</strong>
             </div>
 
-            <button class="icon-button controller-toggle" id="controllerTopToggle" type="button" aria-expanded="true">
+            <button class="icon-button controller-toggle" id="controllerTopToggle" type="button" aria-expanded="true" data-i18n="shell.login">
               登录
             </button>
           </div>
@@ -109,25 +117,25 @@
         <section class="controller-bar" id="controllerBar">
           <div class="controller-panel-head">
             <div>
-              <p class="controller-summary-label">External Controller</p>
-              <h2 id="controllerPanelTitle">连接 dae External Controller</h2>
-              <p class="controller-summary-meta" id="controllerSummaryMeta">输入地址与 token，连接 dae 控制器。</p>
+              <p class="controller-summary-label" data-i18n="shell.externalController">External Controller</p>
+              <h2 id="controllerPanelTitle" data-i18n="shell.externalControllerTitle">连接 dae External Controller</h2>
+              <p class="controller-summary-meta" id="controllerSummaryMeta" data-i18n="shell.externalControllerMeta">输入地址与 token，连接 dae 控制器。</p>
             </div>
 
             <div class="controller-status-pill">
-              <span>Target</span>
+              <span data-i18n="shell.target">Target</span>
               <strong id="controllerSummaryUrl">未连接</strong>
             </div>
           </div>
 
           <div class="controller-body" id="controllerBody">
-            <p class="controller-hint" id="controllerHint">
+            <p class="controller-hint" id="controllerHint" data-i18n="shell.controllerHint">
               连接到 dae 的外部控制器后，Dashboard、Traffic、Proxies、Logs 和 config.dae 才会开始实时更新。
             </p>
 
             <form class="controller-form" id="controllerForm">
               <label class="controller-field" id="controllerUrlField">
-                <span>Controller</span>
+                <span data-i18n="shell.controllerAddress">Controller</span>
                 <input
                   id="controllerUrl"
                   name="controller"
@@ -138,18 +146,18 @@
               </label>
 
               <label class="controller-field token-field">
-                <span>Bearer Token</span>
+                <span data-i18n="shell.bearerToken">Bearer Token</span>
                 <input id="controllerToken" name="token" type="password" spellcheck="false" placeholder="optional" />
               </label>
 
               <div class="controller-actions">
-                <button class="action-button subtle" id="connectButton" type="submit">登录</button>
+                <button class="action-button subtle" id="connectButton" type="submit" data-i18n="shell.login">登录</button>
               </div>
             </form>
 
             <div class="inline-form controller-inline-form">
               <label class="controller-field compact-field">
-                <span>Runtime Log Level</span>
+                <span data-i18n="shell.runtimeLogLevel">Runtime Log Level</span>
                 <select id="runtimeLogLevelSelect">
                   <option value="trace">trace</option>
                   <option value="debug">debug</option>
@@ -159,10 +167,10 @@
                 </select>
               </label>
 
-              <button class="action-button subtle" id="applyLogLevelButton" type="button">Apply</button>
+              <button class="action-button subtle" id="applyLogLevelButton" type="button" data-i18n="shell.apply">Apply</button>
             </div>
 
-            <p class="controller-page-note" id="runtimeLogLevelNote">
+            <p class="controller-page-note" id="runtimeLogLevelNote" data-i18n="shell.runtimeLogNote">
               通过 PATCH /configs 更新运行时日志级别，并保持页面状态同步。
             </p>
           </div>
@@ -178,45 +186,45 @@
               <article class="card hero-card">
                 <div class="hero-header">
                   <div class="hero-copy">
-                    <p class="panel-kicker">Live Runtime</p>
-                    <h2>Runtime at a glance</h2>
+                    <p class="panel-kicker" data-i18n="dashboard.runtimeKicker">Live Runtime</p>
+                    <h2 data-i18n="dashboard.runtimeTitle">Runtime at a glance</h2>
                   </div>
 
                   <div class="hero-badges">
-                    <span class="hero-badge">Version <strong id="runtimeVersionValue">-</strong></span>
+                    <span class="hero-badge"><span data-i18n="dashboard.version">Version</span> <strong id="runtimeVersionValue">-</strong></span>
                   </div>
                 </div>
 
                 <div class="hero-runtime-grid">
                   <div class="hero-system-panel">
                     <div class="subpanel-header">
-                      <h3>System Status</h3>
-                      <span class="nav-badge">LIVE</span>
+                      <h3 data-i18n="dashboard.systemStatus">System Status</h3>
+                      <span class="nav-badge" data-i18n="dashboard.live">LIVE</span>
                     </div>
 
                     <div class="detail-grid hero-status-grid">
                       <div class="detail-row">
-                        <span>Mode</span>
+                        <span data-i18n="dashboard.mode">Mode</span>
                         <strong id="dashboardModeValue">-</strong>
                       </div>
                       <div class="detail-row">
-                        <span>Log Level</span>
+                        <span data-i18n="dashboard.logLevel">Log Level</span>
                         <strong id="dashboardLogLevelValue">-</strong>
                       </div>
                       <div class="detail-row">
-                        <span>Memory</span>
+                        <span data-i18n="dashboard.memory">Memory</span>
                         <strong id="dashboardMemoryValue">-</strong>
                       </div>
                       <div class="detail-row">
-                        <span>Alive Nodes</span>
+                        <span data-i18n="dashboard.aliveNodes">Alive Nodes</span>
                         <strong id="dashboardAliveValue">0 / 0</strong>
                       </div>
                       <div class="detail-row">
-                        <span>Upload Total</span>
+                        <span data-i18n="dashboard.uploadTotal">Upload Total</span>
                         <strong id="uploadTotalValue">0 B</strong>
                       </div>
                       <div class="detail-row">
-                        <span>Download Total</span>
+                        <span data-i18n="dashboard.downloadTotal">Download Total</span>
                         <strong id="downloadTotalValue">0 B</strong>
                       </div>
                     </div>
@@ -224,10 +232,10 @@
 
                   <div class="hero-traffic-panel">
                     <div class="subpanel-header">
-                      <h3>Traffic Flow</h3>
+                      <h3 data-i18n="dashboard.trafficFlow">Traffic Flow</h3>
                       <div class="chart-legend">
-                        <span class="legend-item upload">Upload</span>
-                        <span class="legend-item download">Download</span>
+                        <span class="legend-item upload" data-i18n="dashboard.upload">Upload</span>
+                        <span class="legend-item download" data-i18n="dashboard.download">Download</span>
                       </div>
                     </div>
 
@@ -243,11 +251,11 @@
 
                     <div class="hero-traffic-stats">
                       <div class="mini-stat">
-                        <span>Upload</span>
+                        <span data-i18n="dashboard.upload">Upload</span>
                         <strong id="dashboardUpValue">0 B/s</strong>
                       </div>
                       <div class="mini-stat">
-                        <span>Download</span>
+                        <span data-i18n="dashboard.download">Download</span>
                         <strong id="dashboardDownValue">0 B/s</strong>
                       </div>
                     </div>
@@ -257,34 +265,34 @@
 
               <article class="card preview-card connections-preview-card">
                 <div class="card-header">
-                  <h2>Connections</h2>
+                  <h2 data-i18n="dashboard.connections">Connections</h2>
                   <span class="nav-badge">5S</span>
                 </div>
 
                 <div class="preview-stat-grid three-up">
                   <div class="mini-stat">
-                    <span>Total</span>
+                    <span data-i18n="traffic.total">Total</span>
                     <strong id="dashboardConnectionsTotal">0</strong>
                   </div>
                   <div class="mini-stat">
-                    <span>TCP</span>
+                    <span data-i18n="traffic.tcp">TCP</span>
                     <strong id="dashboardConnectionsTcp">0</strong>
                   </div>
                   <div class="mini-stat">
-                    <span>UDP</span>
+                    <span data-i18n="traffic.udp">UDP</span>
                     <strong id="dashboardConnectionsUdp">0</strong>
                   </div>
                 </div>
 
-                <p class="section-note" id="dashboardConnectionsUpdated">等待 /connections 数据。</p>
+                <p class="section-note" id="dashboardConnectionsUpdated" data-i18n="connections.waiting">等待 /connections 数据。</p>
                 <div class="connection-preview-list" id="dashboardConnectionList"></div>
               </article>
 
               <article class="card proxies-card dashboard-proxies-card">
                 <div class="card-header">
-                  <h2>Proxies</h2>
+                  <h2 data-i18n="proxies.title">Proxies</h2>
 
-                  <button class="action-button ghost" data-open-view="proxies" type="button">Open Proxies</button>
+                  <button class="action-button ghost" data-open-view="proxies" type="button" data-i18n="dashboard.openProxies">Open Proxies</button>
                 </div>
 
                 <div class="proxy-layout dashboard-proxy-layout">
@@ -293,9 +301,9 @@
                   <div class="proxy-panel">
                     <div class="proxy-toolbar">
                       <div>
-                        <p class="proxy-current-label">Current Group</p>
-                        <h3 class="proxy-current-name" id="dashboardCurrentGroupName">No group</h3>
-                        <p class="proxy-current-meta" id="dashboardCurrentGroupMeta">连接控制器后加载代理组与节点。</p>
+                        <p class="proxy-current-label" data-i18n="proxies.currentGroup">Current Group</p>
+                        <h3 class="proxy-current-name" id="dashboardCurrentGroupName" data-i18n="common.noGroup">No group</h3>
+                        <p class="proxy-current-meta" id="dashboardCurrentGroupMeta" data-i18n="proxies.groupMeta.pending">连接控制器后加载代理组与节点。</p>
                       </div>
                     </div>
 
@@ -310,11 +318,11 @@
             <section class="page-grid">
               <article class="card proxies-card">
                 <div class="card-header">
-                  <h2>Proxies</h2>
+                  <h2 data-i18n="proxies.title">Proxies</h2>
 
                   <div class="proxy-toolbar-actions">
-                    <button class="action-button faint" id="resetGroupButton" type="button">Reset Group</button>
-                    <button class="action-button ghost" id="reloadProxiesButton" type="button">Reload Stream</button>
+                    <button class="action-button faint" id="resetGroupButton" type="button" data-i18n="proxies.resetGroup">Reset Group</button>
+                    <button class="action-button ghost" id="reloadProxiesButton" type="button" data-i18n="proxies.reloadStream">Reload Stream</button>
                   </div>
                 </div>
 
@@ -324,9 +332,9 @@
                   <div class="proxy-panel">
                     <div class="proxy-toolbar">
                       <div>
-                        <p class="proxy-current-label">Current Group</p>
-                        <h3 class="proxy-current-name" id="currentGroupName">No group</h3>
-                        <p class="proxy-current-meta" id="currentGroupMeta">连接控制器后加载代理组与节点。</p>
+                        <p class="proxy-current-label" data-i18n="proxies.currentGroup">Current Group</p>
+                        <h3 class="proxy-current-name" id="currentGroupName" data-i18n="common.noGroup">No group</h3>
+                        <p class="proxy-current-meta" id="currentGroupMeta" data-i18n="proxies.groupMeta.pending">连接控制器后加载代理组与节点。</p>
                       </div>
                     </div>
 
@@ -341,10 +349,10 @@
             <section class="page-grid traffic-grid">
               <article class="card traffic-card">
                 <div class="card-header">
-                  <h2>Traffic Flow</h2>
+                  <h2 data-i18n="traffic.title">Traffic Flow</h2>
                   <div class="chart-legend">
-                    <span class="legend-item upload">Upload</span>
-                    <span class="legend-item download">Download</span>
+                    <span class="legend-item upload" data-i18n="dashboard.upload">Upload</span>
+                    <span class="legend-item download" data-i18n="dashboard.download">Download</span>
                   </div>
                 </div>
 
@@ -358,11 +366,11 @@
 
                 <div class="traffic-totals">
                   <div class="mini-stat">
-                    <span>Upload Total</span>
+                    <span data-i18n="traffic.uploadTotal">Upload Total</span>
                     <strong id="trafficUploadTotalValue">0 B</strong>
                   </div>
                   <div class="mini-stat">
-                    <span>Download Total</span>
+                    <span data-i18n="traffic.downloadTotal">Download Total</span>
                     <strong id="trafficDownloadTotalValue">0 B</strong>
                   </div>
                 </div>
@@ -370,20 +378,20 @@
 
               <article class="card connections-live-card">
                 <div class="card-header">
-                  <h2>Active Connections</h2>
+                  <h2 data-i18n="traffic.activeConnections">Active Connections</h2>
 
                   <div class="card-header-actions">
                     <span class="nav-badge">5S</span>
 
                     <label class="table-sort">
-                      <span>Sort</span>
+                      <span data-i18n="traffic.sort">Sort</span>
                       <select id="trafficSortSelect">
-                        <option value="download-speed">Down Speed</option>
-                        <option value="upload-speed">Up Speed</option>
-                        <option value="download-total">Down Total</option>
-                        <option value="upload-total">Up Total</option>
-                        <option value="updated">Last Seen</option>
-                        <option value="process">Process</option>
+                        <option value="download-speed" data-i18n="traffic.sort.downloadSpeed">Down Speed</option>
+                        <option value="upload-speed" data-i18n="traffic.sort.uploadSpeed">Up Speed</option>
+                        <option value="download-total" data-i18n="traffic.sort.downloadTotal">Down Total</option>
+                        <option value="upload-total" data-i18n="traffic.sort.uploadTotal">Up Total</option>
+                        <option value="updated" data-i18n="traffic.sort.updated">Last Seen</option>
+                        <option value="process" data-i18n="traffic.sort.process">Process</option>
                       </select>
                     </label>
                   </div>
@@ -391,24 +399,24 @@
 
                 <div class="preview-stat-grid three-up">
                   <div class="mini-stat">
-                    <span>Total</span>
+                    <span data-i18n="traffic.total">Total</span>
                     <strong id="trafficConnectionsTotal">0</strong>
                   </div>
                   <div class="mini-stat">
-                    <span>TCP</span>
+                    <span data-i18n="traffic.tcp">TCP</span>
                     <strong id="trafficConnectionsTcp">0</strong>
                   </div>
                   <div class="mini-stat">
-                    <span>UDP</span>
+                    <span data-i18n="traffic.udp">UDP</span>
                     <strong id="trafficConnectionsUdp">0</strong>
                   </div>
                 </div>
 
-                <p class="section-note" id="trafficConnectionsUpdated">等待 /connections 数据。</p>
+                <p class="section-note" id="trafficConnectionsUpdated" data-i18n="connections.waiting">等待 /connections 数据。</p>
 
                 <div class="connections-table-wrap">
                   <div class="connections-stream" id="trafficConnectionsList"></div>
-                  <div class="table-empty" id="trafficConnectionsEmpty">暂无活动连接。</div>
+                  <div class="table-empty" id="trafficConnectionsEmpty" data-i18n="connections.empty">暂无活动连接。</div>
                 </div>
               </article>
             </section>
@@ -419,23 +427,23 @@
               <article class="card editor-card config-editor-card">
                 <div class="card-header">
                   <div>
-                    <h2>config.dae Builder</h2>
-                    <p class="section-note">按 section 折叠编辑，常见块走 GUI Builder，复杂语法随时切回 Raw。</p>
+                    <h2 data-i18n="config.header.title">config.dae Builder</h2>
+                    <p class="section-note" data-i18n="config.header.note">按 section 折叠编辑，常见块走 GUI Builder，复杂语法随时切回 Raw。</p>
                   </div>
                 </div>
 
                 <div class="editor-shell">
                   <div class="editor-toolbar">
                     <div class="editor-meta">
-                      <span class="editor-path-label">Loaded File</span>
+                      <span class="editor-path-label" data-i18n="config.loadedFile">Loaded File</span>
                       <code class="editor-path" id="configPathValue">-</code>
                       <div class="config-toolbar-stats">
                         <div class="config-stat-pill">
-                          <span>Sections</span>
+                          <span data-i18n="config.sections">Sections</span>
                           <strong id="configSectionsCountValue">0</strong>
                         </div>
                         <div class="config-stat-pill">
-                          <span>Current</span>
+                          <span data-i18n="config.current">Current</span>
                           <strong id="configCurrentSectionValue">-</strong>
                         </div>
                       </div>
@@ -444,7 +452,7 @@
                     <div class="editor-actions config-toolbar-actions">
                       <div class="config-action-cluster">
                         <label class="controller-field compact-field config-add-field">
-                          <span>Add Section</span>
+                          <span data-i18n="config.addSection">Add Section</span>
                           <select id="configSectionTypeSelect">
                             <option value="global">global</option>
                             <option value="subscription">subscription</option>
@@ -455,12 +463,12 @@
                             <option value="include">include</option>
                           </select>
                         </label>
-                        <button class="action-button ghost" id="addConfigSectionButton" type="button">Add Section</button>
+                        <button class="action-button ghost" id="addConfigSectionButton" type="button" data-i18n="config.addSection">Add Section</button>
                       </div>
 
                       <div class="config-action-cluster config-action-buttons">
-                        <button class="action-button subtle" id="saveConfigButton" type="button">Save + Reload</button>
-                        <button class="action-button ghost" id="refreshConfigButton" type="button">Reload File</button>
+                        <button class="action-button subtle" id="saveConfigButton" type="button" data-i18n="config.action.saveReload">Save + Reload</button>
+                        <button class="action-button ghost" id="refreshConfigButton" type="button" data-i18n="config.action.reloadFile">Reload File</button>
                       </div>
                     </div>
                   </div>
@@ -479,12 +487,12 @@
             <section class="page-grid">
               <article class="card logs-card">
                 <div class="card-header">
-                  <h2>Logs</h2>
+                  <h2 data-i18n="logs.title">Logs</h2>
                 </div>
 
                 <div class="logs-toolbar">
                   <label class="controller-field compact-field">
-                    <span>Stream Level</span>
+                    <span data-i18n="logs.streamLevel">Stream Level</span>
                     <select id="logsLevelSelect">
                       <option value="trace">trace</option>
                       <option value="debug">debug</option>
@@ -496,7 +504,7 @@
 
                   <div class="proxy-toolbar-actions">
                     <button class="action-button faint" id="toggleLogsButton" type="button">Pause</button>
-                    <button class="action-button ghost" id="clearLogsButton" type="button">Clear</button>
+                    <button class="action-button ghost" id="clearLogsButton" type="button" data-i18n="common.clear">Clear</button>
                   </div>
                 </div>
 
@@ -505,7 +513,7 @@
                 </p>
 
                 <div class="logs-shell" id="logsShell">
-                  <div class="logs-empty" id="logsEmpty">No log events yet.</div>
+                  <div class="logs-empty" id="logsEmpty" data-i18n="logs.empty">No log events yet.</div>
                   <div class="logs-list" id="logsList"></div>
                 </div>
               </article>

@@ -111,8 +111,17 @@ type Config struct {
 }
 
 type DaeConfigDocument struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Path      string          `json:"path"`
+	Content   string          `json:"content"`
+	Documents []DaeConfigFile `json:"documents,omitempty"`
+}
+
+type DaeConfigFile struct {
+	Path         string `json:"path"`
+	RelativePath string `json:"relativePath,omitempty"`
+	Content      string `json:"content"`
+	Entry        bool   `json:"entry,omitempty"`
+	Missing      bool   `json:"missing,omitempty"`
 }
 
 type DelayHistory struct {
@@ -149,7 +158,7 @@ type Provider interface {
 	ResetProxy(groupName string) error
 	Delay(name, probeURL string, timeout time.Duration) (int, error)
 	SetLogLevel(level string) error
-	UpdateDaeConfig(content string) error
+	UpdateDaeConfig(document DaeConfigDocument) error
 }
 
 type structuredLogField struct {
@@ -344,14 +353,12 @@ func (s *Server) handleDaeConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, doc)
 	case http.MethodPut:
-		req := struct {
-			Content string `json:"content"`
-		}{}
+		req := DaeConfigDocument{}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, errBadRequest)
 			return
 		}
-		if err := s.provider.UpdateDaeConfig(req.Content); err != nil {
+		if err := s.provider.UpdateDaeConfig(req); err != nil {
 			writeError(w, http.StatusBadRequest, &HTTPError{Message: err.Error()})
 			return
 		}

@@ -10,6 +10,21 @@
 - `Config`
 - `Logs`
 
+当前 `Config` 页面支持：
+
+- 直接读取主配置 `config.dae`
+- 检测 `include { ... }`
+- 递归加载被 `include` 到的子 `.dae` 文件
+- 在 UI 中按“文件 + section”拆开编辑
+- 保存时把整组配置一起回写
+
+当前 UI 还支持基础 `i18n`：
+
+- `简体中文`
+- `English`
+
+语言切换入口在右上角。
+
 文件说明：
 
 - `index.html`: 页面结构
@@ -209,6 +224,16 @@ UI 使用 dae 的外部控制器鉴权：
 - `GET /logs`
 
 其中多项数据会优先通过 WebSocket 持续推送。
+
+`GET /configs/dae` / `PUT /configs/dae` 现在返回和接收的是多文件 bundle，除了主文件外，还会带上：
+
+- `documents[].path`
+- `documents[].relativePath`
+- `documents[].content`
+- `documents[].entry`
+- `documents[].missing`
+
+这样 UI 才能把主配置和 `include` 进来的子配置一起编辑。
 
 ## 排障
 
