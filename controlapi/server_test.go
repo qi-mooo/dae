@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -405,6 +407,18 @@ func TestGetEditableDaeConfig(t *testing.T) {
 }
 
 func TestWebUIIsServedWithoutBreakingAPIAuth(t *testing.T) {
+	uiDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(uiDir, "index.html"), []byte(`<form id="controllerForm"></form>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(uiDir, "script.js"), []byte(`console.log("ok")`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(uiDir, "styles.css"), []byte(`body{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(webUIDirEnv, uiDir)
+
 	provider := &fakeProvider{
 		proxies: map[string]Proxy{},
 	}
