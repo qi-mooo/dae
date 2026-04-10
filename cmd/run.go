@@ -38,7 +38,6 @@ import (
 	"github.com/daeuniverse/dae/component/daedns"
 	"github.com/daeuniverse/dae/config"
 	"github.com/daeuniverse/dae/control"
-	"github.com/daeuniverse/dae/controlapi"
 	"github.com/daeuniverse/dae/pkg/config_parser"
 	"github.com/daeuniverse/dae/pkg/logger"
 	"github.com/mohae/deepcopy"
@@ -152,19 +151,25 @@ func Run(log *logrus.Logger, conf *config.Config, externGeoDataDirs []string) (e
 		return err
 	}
 
-	var controllerServer *controlapi.Server
-	var logBroker *controlapi.LogBroker
+	var controllerServer ExternalControllerHandle
+	var controllerLogSink ExternalControllerLogSink
 	standardLoggerHookAttached := false
 
 	attachControllerLogHook := func(currentLog *logrus.Logger) {
-		if logBroker == nil {
-			logBroker = controlapi.NewLogBroker()
+		if ControllerLogSinkFactory == nil {
+			return
+		}
+		if controllerLogSink == nil {
+			controllerLogSink = ControllerLogSinkFactory()
+		}
+		if controllerLogSink == nil {
+			return
 		}
 		if currentLog != nil {
-			currentLog.AddHook(logBroker.Hook())
+			currentLog.AddHook(controllerLogSink.Hook())
 		}
 		if !standardLoggerHookAttached {
-			logrus.StandardLogger().AddHook(logBroker.Hook())
+			logrus.StandardLogger().AddHook(controllerLogSink.Hook())
 			standardLoggerHookAttached = true
 		}
 	}
@@ -177,19 +182,25 @@ func Run(log *logrus.Logger, conf *config.Config, externGeoDataDirs []string) (e
 		if currentConf == nil || plane == nil || currentConf.Global.ExternalController == "" {
 			return nil
 		}
+		factory := ControllerFactory
+		if factory == nil {
+			currentLog.Warn("External controller is configured but no controller factory is registered")
+			return nil
+		}
 		attachControllerLogHook(currentLog)
-		provider, err := controlapi.NewDaeProvider(Version, currentConf, plane, cfgFile, currentLog, logrus.StandardLogger())
+		runtime := ExternalControllerRuntime{
+			Version:      Version,
+			Config:       currentConf,
+			ControlPlane: plane,
+			ConfigPath:   cfgFile,
+			Loggers:      []*logrus.Logger{currentLog, logrus.StandardLogger()},
+			LogSink:      controllerLogSink,
+		}
+		server, err := factory(runtime)
 		if err != nil {
 			return err
 		}
-		controllerServer = controlapi.NewServer(controlapi.ServerConfig{
-			Addr:   currentConf.Global.ExternalController,
-			Secret: currentConf.Global.ExternalControllerSecret,
-		}, provider, logBroker)
-		if err := controllerServer.Start(); err != nil {
-			controllerServer = nil
-			return err
-		}
+		controllerServer = server
 		currentLog.Infof("External controller listening at: %s", currentConf.Global.ExternalController)
 		if controllerServer.WebUIEnabled() {
 			currentLog.Infof("Web UI available at: http://%s/ui/", currentConf.Global.ExternalController)
@@ -311,7 +322,7 @@ func Run(log *logrus.Logger, conf *config.Config, externGeoDataDirs []string) (e
 			logger.SetLogger(logrus.StandardLogger(), newConf.Global.LogLevel, disableTimestamp, nil)
 			log.SetOutput(oldLogOutput) // NOTE: Restore log output after creating new logger during reload.
 			logrus.SetOutput(oldLogOutput)
-			if logBroker != nil || newConf.Global.ExternalController != "" {
+			if controllerLogSink != nil || newConf.Global.ExternalController != "" {
 				attachControllerLogHook(log)
 			}
 

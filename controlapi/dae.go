@@ -370,7 +370,7 @@ func (p *DaeProvider) Proxy(name string) (Proxy, bool) {
 func (p *DaeProvider) UpdateProxy(groupName, proxyName string) error {
 	group := p.plane.OutboundByName(groupName)
 	if group == nil {
-		return providerErrNotFound
+		return ErrProviderNotFound
 	}
 	if isBuiltinOutbound(group.Name) {
 		return fmt.Errorf("built-in outbound %q cannot be updated", group.Name)
@@ -389,7 +389,7 @@ func (p *DaeProvider) UpdateProxy(groupName, proxyName string) error {
 func (p *DaeProvider) ResetProxy(groupName string) error {
 	group := p.plane.OutboundByName(groupName)
 	if group == nil {
-		return providerErrNotFound
+		return ErrProviderNotFound
 	}
 	policy, ok := p.defaultPolicies[groupName]
 	if !ok {
@@ -577,7 +577,7 @@ func (p *DaeProvider) resolveProxyTarget(name string) (*dialer.Dialer, error) {
 			return d, nil
 		}
 	}
-	return nil, providerErrNotFound
+	return nil, ErrProviderNotFound
 }
 
 func (p *DaeProvider) defaultDelay(ctx context.Context, d *dialer.Dialer) (int, error) {

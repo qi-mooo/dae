@@ -19,8 +19,11 @@ const (
 )
 
 var (
-	Version = "unknown"
-	rootCmd = &cobra.Command{
+	Version      = "unknown"
+	ProgramName  = "dae"
+	ProgramShort = "dae is a high-performance transparent proxy solution."
+	ProgramLong  = `dae is a high-performance transparent proxy solution.`
+	rootCmd      = &cobra.Command{
 		Use:     "dae [flags] [command [argument ...]]",
 		Short:   "dae is a high-performance transparent proxy solution.",
 		Long:    `dae is a high-performance transparent proxy solution.`,
@@ -32,7 +35,14 @@ var (
 )
 
 func init() {
+	refreshRootCommandMetadata()
+}
+
+func refreshRootCommandMetadata() {
 	config.Version = Version
+	rootCmd.Use = fmt.Sprintf("%s [flags] [command [argument ...]]", ProgramName)
+	rootCmd.Short = ProgramShort
+	rootCmd.Long = ProgramLong
 	rootCmd.Version = strings.Join([]string{
 		Version,
 		fmt.Sprintf("go runtime %v %v/%v", runtime.Version(), runtime.GOOS, runtime.GOARCH),
@@ -43,5 +53,6 @@ func init() {
 
 // Execute executes the root command.
 func Execute() error {
+	refreshRootCommandMetadata()
 	return rootCmd.Execute()
 }
