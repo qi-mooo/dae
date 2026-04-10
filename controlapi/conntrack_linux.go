@@ -15,6 +15,11 @@ import (
 const conntrackCacheInterval = 900 * time.Millisecond
 
 var conntrackProcPaths = []string{
+	// dae may run inside a dedicated network namespace on OpenWrt.
+	// Read PID 1's conntrack table first so traffic telemetry reflects the host/router
+	// namespace instead of dae's own isolated namespace.
+	"/proc/1/net/nf_conntrack",
+	"/proc/1/net/ip_conntrack",
 	"/proc/net/nf_conntrack",
 	"/proc/net/ip_conntrack",
 }
