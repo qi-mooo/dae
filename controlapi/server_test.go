@@ -62,8 +62,8 @@ func (f *fakeProvider) SetLogLevel(level string) error {
 	f.lastLogLevel = level
 	return nil
 }
-func (f *fakeProvider) UpdateDaeConfig(content string) error {
-	f.lastDaeConfig = content
+func (f *fakeProvider) UpdateDaeConfig(document DaeConfigDocument) error {
+	f.lastDaeConfig = document.Content
 	return nil
 }
 
@@ -366,6 +366,14 @@ func TestGetEditableDaeConfig(t *testing.T) {
 		daeConfig: DaeConfigDocument{
 			Path:    "/etc/dae/config.dae",
 			Content: "global{} routing{}",
+			Documents: []DaeConfigFile{
+				{
+					Path:         "/etc/dae/config.dae",
+					RelativePath: "config.dae",
+					Content:      "global{} routing{}",
+					Entry:        true,
+				},
+			},
 		},
 		proxies: map[string]Proxy{},
 	}
@@ -390,6 +398,9 @@ func TestGetEditableDaeConfig(t *testing.T) {
 	}
 	if got.Content != "global{} routing{}" {
 		t.Fatalf("config content = %q", got.Content)
+	}
+	if len(got.Documents) != 1 || got.Documents[0].RelativePath != "config.dae" {
+		t.Fatalf("unexpected config documents = %#v", got.Documents)
 	}
 }
 

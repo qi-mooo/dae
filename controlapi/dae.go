@@ -119,14 +119,11 @@ func (p *DaeProvider) DaeConfigDocument() (DaeConfigDocument, error) {
 	if p.configPath == "" {
 		return DaeConfigDocument{}, fmt.Errorf("config file path is unavailable")
 	}
-	content, err := os.ReadFile(p.configPath)
+	document, err := loadDaeConfigDocumentBundle(p.configPath)
 	if err != nil {
-		return DaeConfigDocument{}, fmt.Errorf("read config file: %w", err)
+		return DaeConfigDocument{}, err
 	}
-	return DaeConfigDocument{
-		Path:    p.configPath,
-		Content: string(content),
-	}, nil
+	return document, nil
 }
 
 func (p *DaeProvider) Memory() Memory {
@@ -449,55 +446,23 @@ func (p *DaeProvider) SetLogLevel(level string) error {
 	return nil
 }
 
-func (p *DaeProvider) UpdateDaeConfig(content string) error {
+func (p *DaeProvider) UpdateDaeConfig(document DaeConfigDocument) error {
 	if p.configPath == "" {
 		return fmt.Errorf("config file path is unavailable")
 	}
 
-	dir := filepath.Dir(p.configPath)
-	tmp, err := os.CreateTemp(dir, ".dae-controller-*.dae")
+	documents, err := buildDaeConfigUpdateBundle(p.configPath, document)
 	if err != nil {
-		return fmt.Errorf("create temp config: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-
-	mode := os.FileMode(0600)
-	if stat, err := os.Stat(p.configPath); err == nil {
-		mode = stat.Mode().Perm()
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("set temp config mode: %w", err)
-	}
-	if _, err := tmp.WriteString(content); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("write temp config: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp config: %w", err)
-	}
-
-	if err := validateDaeConfigFile(tmpPath); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpPath, p.configPath); err != nil {
-		return fmt.Errorf("replace config file: %w", err)
+	if err := validateDaeConfigDocuments(documents); err != nil {
+		return err
+	}
+	if err := writeDaeConfigDocuments(documents); err != nil {
+		return err
 	}
 	if err := syscall.Kill(os.Getpid(), syscall.SIGUSR1); err != nil {
 		return fmt.Errorf("send reload signal: %w", err)
-	}
-	return nil
-}
-
-func validateDaeConfigFile(path string) error {
-	merger := config.NewMerger(path)
-	sections, _, err := merger.Merge()
-	if err != nil {
-		return err
-	}
-	if _, err := config.New(sections); err != nil {
-		return err
 	}
 	return nil
 }
